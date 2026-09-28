@@ -52,6 +52,7 @@
     <ClCompile Include="xr\xr_system.cpp" />
     <ClCompile Include="xr\xr_input.cpp" />
     <ClCompile Include="input\vr_controls.cpp" />
+    <ClCompile Include="input\screen_pointer.cpp" />
     <ClCompile Include="ui\vr_menu.cpp" />
     <!-- Dear ImGui (VR settings menu) -->
     <ClCompile Include="..\third_party\imgui\imgui.cpp" />
@@ -79,6 +80,8 @@
     <ClInclude Include="xr\xr_system.h" />
     <ClInclude Include="xr\xr_input.h" />
     <ClInclude Include="input\vr_controls.h" />
+    <ClInclude Include="input\screen_pointer.h" />
+    <ClInclude Include="xr\xr_pose.h" />
     <ClInclude Include="ui\vr_menu.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

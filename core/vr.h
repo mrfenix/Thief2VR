@@ -16,6 +16,10 @@ bool VrInitEarly();
 // Returns whether the game's own Present (to the desktop window) should run.
 bool VrOnPresent(IDirect3DDevice9* device);
 
+// Recenter the view (F8 / the VR menu): the head's neutral position and forward,
+// and the game's 2D screen is moved to where you look.
+void VrRecenter();
+
 // Time the desktop Present took, for the timing log.
 void VrRecordDesktopPresent(double ms);
 

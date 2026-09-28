@@ -80,13 +80,24 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - `FUN_004639e0` installs render callbacks: `[0xbe7268] = FUN_00463c60` (the arm renderer), with the previous value chained through `DAT_008d9614`.
 - The world renderer `FUN_004dad50` (called from the scene render) calls `[0xbe7268]` at its end. So the arm is drawn inside every scene render (once per eye in stereo), with its own near/far clip range and `dark_zcomp_arm`.
 - `FUN_00463c60` needs the render context (`DAT_00aac0c8`) of the world render. Calling it outside that context crashes at 0x5eeb1b.
-- Thief2VR hooks `FUN_00463c60` and swaps in a substituted render camera (context +0x44) for that draw, so the arm appears in the hand.
+- Thief2VR hooks `FUN_00463c60` and swaps in a substituted object transform (context +0x44) for that draw, so the arm appears in the hand.
+- Render context layout (F12 dump; 9 floats read row by row into a matrix M):
+  - +0x44: the current object's transform M, with o at +0x68. Applied as `x_world = M^T x + o`. For the arm it's identity and 0, because creature vertices are already in world space.
+  - +0x78: the camera C, with t at +0x9c. Applied as `view = C^T x + t`, where `t = -C^T eye`.
+  - +0x114: the camera basis. +0x138: the eye position.
+  - Arm in hand, with `D = R_hand R_gamecam^T`: `M' = M D^T`, `o' = p_hand + D (o - p_gamecam)`.
+- The sword and the hand share one texture atlas (`swhand`, 256x256). The blade is the strip at x 0–24 over the full height; the hilt wrap is at the top, x 0–29.
 - Limb mode `DAT_008717f8`, with the pending mode in `DAT_008717f4`, applied by `FUN_0054c880`:
   - 0xff = none
   - 0 = empty hands (`FUN_0046a110`)
   - 1 = bow (`FUN_0046a780`, sets a 5000 ms value, likely max draw)
   - 2 = sword / blackjack (`FUN_0046c230`, sets the attack timings)
   - 4 = carrying a body (`FUN_0046a090`)
+
+### Menus / 2D screens (mouse)
+- The exe imports `GetCursorPos`, `SetCursorPos`, `ClipCursor`, `ScreenToClient` and `ClientToScreen`. It also loads `dinput.dll` (`DirectInputCreateA`) and raw input (`RegisterRawInputDevices` / `GetRawInputData`, cfg `raw_mouse_input`).
+- Thief2VR drives the menus with `SetCursorPos` plus `SendInput` (real OS input, so every path above sees it). See `core/input/screen_pointer.cpp`.
+- Commands: `automap` (bound to m), `objectives` (bound to o), `sim_menu` (Esc).
 
 ### Frame (F9 trace, mission, 800x600)
 1. BeginScene/EndScene pair with no draws (a UI/2D pass).

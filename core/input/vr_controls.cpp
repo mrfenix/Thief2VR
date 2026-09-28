@@ -37,7 +37,7 @@ struct Edge {
 
 HeldInput g_use_weapon{"use_weapon"}, g_use_item{"use_item"}, g_block{"block"};
 HeldInput g_crouch_hold{"crouchhold"}, g_jump{"jump"}, g_lean_left{"leanleft"}, g_lean_right{"leanright"};
-Edge g_snap, g_crouch_toggle, g_run_toggle, g_map, g_a, g_b, g_x, g_y;
+Edge g_snap, g_crouch_toggle, g_run_toggle, g_map, g_a, g_b, g_x;
 bool g_run_on;
 bool g_moving;
 
@@ -218,8 +218,21 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         EngineCommand("clear_weapon");
     if (g_x.Pressed(c.x))
         EngineCommand("next_item");
-    if (g_y.Pressed(c.y))
-        EngineCommand("prev_item");
+    // Y: tap = previous item (on release), hold = objectives.
+    static double y_held = -1;  // seconds held; -1 up, -2 hold already fired
+    if (c.y) {
+        if (y_held == -1)
+            y_held = 0;
+        else if (y_held >= 0 && (y_held += dt) >= 0.5) {
+            EngineCommand("objectives");
+            XrControls().Vibrate(0, 0.3f, 0.05f);
+            y_held = -2;
+        }
+    } else {
+        if (y_held >= 0)
+            EngineCommand("prev_item");
+        y_held = -1;
+    }
     if (g_map.Pressed(c.stick_click[1]))
         EngineCommand("automap");
 }

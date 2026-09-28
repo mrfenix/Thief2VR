@@ -2,6 +2,7 @@
 
 #include "config/settings.h"
 #include "engine/engine.h"
+#include "input/screen_pointer.h"
 #include "input/vr_controls.h"
 #include "log.h"
 #include "ui/vr_menu.h"
@@ -10,6 +11,7 @@
 #include "xr/xr_input.h"
 #include "render/frame_transfer.h"
 #include "render/stereo.h"
+#include "xr/xr_pose.h"
 
 namespace {
 
@@ -26,6 +28,13 @@ struct Stats {
            last_present = 0;
 } g_stats;
 char g_timing_text[256] = "Timing appears after about 10 seconds in a mission.";
+
+// The game's window (the device's focus window), for the screen pointer.
+HWND GameWindow(IDirect3DDevice9* device)
+{
+    D3DDEVICE_CREATION_PARAMETERS cp{};
+    return SUCCEEDED(device->GetCreationParameters(&cp)) ? cp.hFocusWindow : nullptr;
+}
 
 void EnsureSwapchain(XrSwapchainD3D11& sc, UINT w, UINT h)
 {
@@ -102,20 +111,27 @@ struct FlatLayer {
         ReleaseScaled();
     }
 
-    void Fill(XrCompositionLayerQuad& quad, XrSpace space, XrVector3f position, float width) const
+    void Fill(XrCompositionLayerQuad& quad, XrSpace space, const XrPosef& pose, float width) const
     {
         quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         quad.space = space;
         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage.swapchain = swapchain.handle();
         quad.subImage.imageRect = {{0, 0}, {(int32_t)swapchain.width(), (int32_t)swapchain.height()}};
-        quad.pose.orientation.w = 1.0f;
-        quad.pose.position = position;
+        quad.pose = pose;
         quad.size = {width, width * swapchain.height() / swapchain.width()};
     }
 };
 
 FlatLayer g_screen;  // menus, or in game with stereo off
+// The screen is world-locked where you look when it appears (re-placed on
+// recenter or when its distance setting changes).
+XrPosef g_screen_pose;
+bool g_screen_placed;
+float g_screen_placed_distance;
+// Right trigger ignored by the game controls until released (after clicking
+// "Continue" on a menu, so the click doesn't also swing the weapon).
+bool g_suppress_trigger;
 FlatLayer g_hud;     // overlays only, drawn over black by the game
 
 // Stereo eyes.
@@ -340,6 +356,12 @@ void VrOnEyesRendered(IDirect3DDevice9* device, const EyeTargets& eyes, const Xr
     }
 }
 
+void VrRecenter()
+{
+    StereoRequestRecenter();
+    g_screen_placed = false;
+}
+
 void VrRecordDesktopPresent(double ms)
 {
     g_stats.desktop += ms;
@@ -350,7 +372,7 @@ bool VrOnPresent(IDirect3DDevice9* device)
     static bool f8_was_down;
     bool f8_down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     if (f8_down && !f8_was_down)
-        StereoRequestRecenter();
+        VrRecenter();
     f8_was_down = f8_down;
 
     EngineTraceTick();
@@ -401,18 +423,32 @@ bool VrOnPresent(IDirect3DDevice9* device)
             menu_held_ms = -2;  // fired; wait for release
         }
     } else {
-        if (menu_held_ms >= 0 && !MenuIsOpen())
-            EngineCommand("sim_menu");
+        if (menu_held_ms >= 0 && !MenuIsOpen()) {
+            // In a mission: the game's menu command. On a 2D screen (commands may
+            // not run there): Esc, which backs out of menus.
+            if (in_scene)
+                EngineCommand("sim_menu");
+            else
+                ScreenPointerSendEsc(GameWindow(device));
+        }
         menu_held_ms = -1;
     }
 
-    ControlsUpdate(controllers, in_scene && !MenuIsOpen(), dt);
+    XrControllerState game_controls = controllers;
+    if (g_suppress_trigger) {
+        if (controllers.trigger[1] < 0.2f)
+            g_suppress_trigger = false;
+        else
+            game_controls.trigger[1] = 0;
+    }
+    ControlsUpdate(game_controls, in_scene && !MenuIsOpen(), dt);
 
     XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                  {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-    XrCompositionLayerQuad quad, menu_quad;
-    const XrCompositionLayerBaseHeader* layers[3];
+    XrCompositionLayerQuad quad, menu_quad, dot_quad;
+    const XrCompositionLayerBaseHeader* layers[4];
+    bool pointer_used = false;
     uint32_t layer_count = 0;
 
     if (g_scene_this_frame) {
@@ -443,7 +479,8 @@ bool VrOnPresent(IDirect3DDevice9* device)
             bool hud_ok = g_hud.Update(device, g_frame.should_render, true, s.hud_capture_scale);
             g_stats.hud += VrNowMs() - t0;
             if (hud_ok) {
-                g_hud.Fill(quad, Xr().view_space(), {0.0f, s.hud_vertical_offset, -s.hud_distance}, s.hud_width);
+                XrPosef hud_pose{{0, 0, 0, 1}, {0.0f, s.hud_vertical_offset, -s.hud_distance}};
+                g_hud.Fill(quad, Xr().view_space(), hud_pose, s.hud_width);
                 quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
             }
@@ -452,9 +489,26 @@ bool VrOnPresent(IDirect3DDevice9* device)
         if (present_to_desktop)
             MirrorToWindow(device);
     } else if (g_screen.Update(device, g_frame.should_render, false)) {
-        g_screen.Fill(quad, Xr().local_space(), {0.0f, 0.0f, -s.screen_distance}, s.screen_width);
+        if (!g_screen_placed || g_screen_placed_distance != s.screen_distance) {
+            g_screen_pose = PoseInFrontOfHead(g_frame, s.screen_distance, 0.0f);
+            g_screen_placed = true;
+            g_screen_placed_distance = s.screen_distance;
+            Log("Screen: placed %.2f m in front of the view", s.screen_distance);
+        }
+        g_screen.Fill(quad, Xr().local_space(), g_screen_pose, s.screen_width);
         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        if (!MenuIsOpen()) {
+            pointer_used = true;
+            g_suppress_trigger = true;
+            if (ScreenPointerUpdate(controllers, g_screen_pose, quad.size.width, quad.size.height,
+                                    GameWindow(device), dot_quad))
+                layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&dot_quad);
+        }
     }
+    if (in_scene)
+        g_screen_placed = false;  // the next 2D screen appears where you look then
+    if (!pointer_used)
+        ScreenPointerIdle();
     if (MenuUpdate(controllers, dt, menu_quad))
         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu_quad);
 

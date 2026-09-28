@@ -5,6 +5,7 @@
 #include "../render/stereo.h"
 #include "../vr.h"
 #include "../vrmath.h"
+#include "../xr/xr_pose.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_dx11.h>
@@ -84,29 +85,10 @@ bool Init()
 // Where the right controller's aim ray hits the panel, in pixels (false if it misses).
 bool PointerOnPanel(const XrControllerState& c, ImVec2& out)
 {
-    if (!c.pose_valid[1])
+    float u, v;
+    if (!c.pose_valid[1] || !RayHitQuad(c.aim_pose[1], g_pose, kWidthM, kWidthM * kTexH / kTexW, u, v))
         return false;
-    const XrPosef& aim = c.aim_pose[1];
-    Quat qa{aim.orientation.x, aim.orientation.y, aim.orientation.z, aim.orientation.w};
-    Vec3 o{aim.position.x, aim.position.y, aim.position.z};
-    Vec3 d = Rotate(qa, {0, 0, -1});
-
-    Quat qp{g_pose.orientation.x, g_pose.orientation.y, g_pose.orientation.z, g_pose.orientation.w};
-    Vec3 center{g_pose.position.x, g_pose.position.y, g_pose.position.z};
-    Vec3 n = Rotate(qp, {0, 0, 1});  // the panel faces +Z, towards the player
-    float denom = Dot(d, n);
-    if (denom > -1e-4f)
-        return false;
-    float t = Dot(center - o, n) / denom;
-    if (t < 0)
-        return false;
-    Vec3 local = Rotate(Conjugate(qp), (o + d * t) - center);
-    float height_m = kWidthM * kTexH / kTexW;
-    float u = (local.x / kWidthM + 0.5f) * kTexW;
-    float v = (0.5f - local.y / height_m) * kTexH;
-    if (u < 0 || v < 0 || u > kTexW || v > kTexH)
-        return false;
-    out = ImVec2(u, v);
+    out = ImVec2(u * kTexW, v * kTexH);
     return true;
 }
 
@@ -177,7 +159,7 @@ void BuildUi()
     }
     ImGui::SameLine();
     if (ImGui::Button("Recenter view"))
-        StereoRequestRecenter();
+        VrRecenter();
     ImGui::End();
 }
 
@@ -205,16 +187,7 @@ void MenuToggle(const XrFrame& frame)
         return;
 
     // World-locked, level, in front of where the head is looking.
-    const XrPosef& eye = frame.views[0].pose;
-    Vec3 head{(frame.views[0].pose.position.x + frame.views[1].pose.position.x) * 0.5f,
-              (frame.views[0].pose.position.y + frame.views[1].pose.position.y) * 0.5f,
-              (frame.views[0].pose.position.z + frame.views[1].pose.position.z) * 0.5f};
-    Vec3 fwd = Rotate({eye.orientation.x, eye.orientation.y, eye.orientation.z, eye.orientation.w}, {0, 0, -1});
-    float yaw = std::atan2(-fwd.x, -fwd.z);
-    Quat q = YawQuat(yaw);
-    Vec3 pos = head + Rotate(q, {0, -kDropM, -kDistanceM});
-    g_pose.orientation = {q.x, q.y, q.z, q.w};
-    g_pose.position = {pos.x, pos.y, pos.z};
+    g_pose = PoseInFrontOfHead(frame, kDistanceM, kDropM);
 
     g_open = true;
     g_close_requested = false;
