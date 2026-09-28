@@ -133,7 +133,54 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
 
     // --- Triggers and grips ---
     static bool rt, rg, lt, lg;
-    bool weapon = Analog(rt, c.trigger[1]);
+
+    // --- Swing to attack: a fast swing taps "use weapon" (Thief's quick
+    //     attack). Holding the trigger instead still winds up a charged attack.
+    //     Only for the sword / blackjack arm, never the bow or a carried body.
+    // Limb modes (see docs/re-map.md): 1 = bow, 2 = sword / blackjack, 4 = body.
+    static double swing_hold = 0, swing_cooldown = 0;
+    static Vec3 last_tip;
+    static bool have_last_tip;
+    swing_hold -= dt;
+    swing_cooldown -= dt;
+    const bool melee = EngineLimbMode() == 2;
+    if (c.pose_valid[1]) {
+        // A point ~40 cm along the blade.
+        const XrPosef& aim = c.aim_pose[1];
+        Quat q{aim.orientation.x, aim.orientation.y, aim.orientation.z, aim.orientation.w};
+        Vec3 r = Rotate(q, {0, 0, -0.4f});
+        Vec3 tip = Vec3{aim.position.x, aim.position.y, aim.position.z} + r;
+
+        // Its speed: from the runtime's velocities if it reports them (v + w x r),
+        // otherwise from the movement since last frame.
+        float speed = 0;
+        static bool logged_source;
+        if (c.velocity_valid[1]) {
+            const XrVector3f& v = c.linear_velocity[1];
+            const XrVector3f& w = c.angular_velocity[1];
+            speed = Length(Vec3{v.x + (w.y * r.z - w.z * r.y), v.y + (w.z * r.x - w.x * r.z),
+                                v.z + (w.x * r.y - w.y * r.x)});
+        } else if (have_last_tip && dt > 0.001) {
+            speed = Length(tip - last_tip) / (float)dt;
+        }
+        if (!logged_source) {
+            logged_source = true;
+            Log("Controls: swing speed from %s", c.velocity_valid[1] ? "runtime velocities" : "pose differences");
+        }
+        last_tip = tip;
+        have_last_tip = true;
+
+        if (s.swing_to_attack && melee && !rt && swing_cooldown <= 0 && speed > s.swing_speed) {
+            swing_hold = 0.001;  // press for one frame, then release = quick swing
+            swing_cooldown = 0.4;
+            XrControls().Vibrate(1, 0.5f, 0.06f);
+            Log("Controls: swing attack (tip %.1f m/s)", speed);
+        }
+    } else {
+        have_last_tip = false;
+    }
+
+    bool weapon = Analog(rt, c.trigger[1]) || swing_hold > 0;
     if (weapon && !g_use_weapon.down)
         XrControls().Vibrate(1, 0.2f, 0.03f);
     g_use_weapon.Set(weapon);

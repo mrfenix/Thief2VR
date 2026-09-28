@@ -5,6 +5,7 @@
 
 #include <intrin.h>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -55,6 +56,15 @@ struct Redirect {
 } g_redirect;
 
 bool g_position_rhw;  // current vertex format is pre-transformed (XYZRHW / POSITIONT)
+void (*g_draw_probe)();  // one-shot, see SetDrawProbe
+
+void RunDrawProbe()
+{
+    if (void (*probe)() = g_draw_probe) {
+        g_draw_probe = nullptr;
+        probe();
+    }
+}
 std::vector<unsigned char> g_scratch;
 
 // D3D9 pixel centres are at integer coordinates, so pixel edges are at -0.5.
@@ -388,6 +398,7 @@ HRESULT STDMETHODCALLTYPE HookSetScissorRect(IDirect3DDevice9* d, const RECT* r)
 
 HRESULT STDMETHODCALLTYPE HookDrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT start, UINT count)
 {
+    RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawPrimitive(type %d)", t);
     if (g_redirect.scaling && g_position_rhw) {
@@ -401,6 +412,7 @@ HRESULT STDMETHODCALLTYPE HookDrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYP
 HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, INT base, UINT minv,
                                                    UINT numv, UINT start, UINT count)
 {
+    RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawIndexedPrimitive(type %d)", t);
     if (g_redirect.scaling && g_position_rhw) {
@@ -411,9 +423,52 @@ HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMI
     return g_real_DrawIndexedPrimitive(d, t, base, minv, numv, start, count);
 }
 
+// --- Geometry capture (SetGeometryCapture) ---
+FILE* g_capture;
+DWORD g_fvf;
+int g_capture_draw;
+
+// Writes the triangles of a triangle list/strip/fan draw (optionally indexed).
+void CaptureTriangles(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT prims, const void* data, UINT stride,
+                      const void* idx, D3DFORMAT idx_fmt)
+{
+    if (!g_capture || !g_position_rhw || !data || (g_fvf & D3DFVF_TEXCOUNT_MASK) == 0 ||
+        (t != D3DPT_TRIANGLELIST && t != D3DPT_TRIANGLESTRIP && t != D3DPT_TRIANGLEFAN))
+        return;
+    UINT uv = 16 + ((g_fvf & D3DFVF_DIFFUSE) ? 4 : 0) + ((g_fvf & D3DFVF_SPECULAR) ? 4 : 0);
+    auto vertex = [&](UINT i) { return reinterpret_cast<const float*>(static_cast<const char*>(data) + i * stride); };
+    ++g_capture_draw;
+    // Header: which texture (and its size) the draw uses, so the atlas can be told apart.
+    IDirect3DBaseTexture9* base = nullptr;
+    D3DSURFACE_DESC desc = {};
+    if (SUCCEEDED(d->GetTexture(0, &base)) && base) {
+        if (base->GetType() == D3DRTYPE_TEXTURE)
+            static_cast<IDirect3DTexture9*>(base)->GetLevelDesc(0, &desc);
+        fprintf(g_capture, "# draw %d tex %p %ux%u type %d prims %u\n", g_capture_draw, static_cast<void*>(base),
+                desc.Width, desc.Height, t, prims);
+        base->Release();
+    } else {
+        fprintf(g_capture, "# draw %d tex none type %d prims %u\n", g_capture_draw, t, prims);
+    }
+    for (UINT p = 0; p < prims; ++p) {
+        fprintf(g_capture, "%d", g_capture_draw);
+        for (UINT k = 0; k < 3; ++k) {
+            UINT i = t == D3DPT_TRIANGLELIST ? p * 3 + k : t == D3DPT_TRIANGLESTRIP ? p + k : (k == 0 ? 0 : p + k);
+            if (idx)
+                i = idx_fmt == D3DFMT_INDEX32 ? static_cast<const uint32_t*>(idx)[i] : static_cast<const uint16_t*>(idx)[i];
+            const float* v = vertex(i);
+            const float* tc = reinterpret_cast<const float*>(reinterpret_cast<const char*>(v) + uv);
+            fprintf(g_capture, " %.2f %.2f %.4f %.4f", v[0], v[1], tc[0], tc[1]);
+        }
+        fputc('\n', g_capture);
+    }
+}
+
 HRESULT STDMETHODCALLTYPE HookDrawPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT count, const void* data,
                                               UINT stride)
 {
+    RunDrawProbe();
+    CaptureTriangles(d, t, count, data, stride, nullptr, D3DFMT_UNKNOWN);
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawPrimitiveUP(type %d stride %u)", t, stride);
     if (g_redirect.scaling && g_position_rhw && data)
@@ -425,6 +480,8 @@ HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitiveUP(IDirect3DDevice9* d, D3DPRI
                                                      UINT count, const void* idx, D3DFORMAT fmt, const void* data,
                                                      UINT stride)
 {
+    RunDrawProbe();
+    CaptureTriangles(d, t, count, data, stride, idx, fmt);
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawIndexedPrimitiveUP(type %d stride %u)", t, stride);
     if (g_redirect.scaling && g_position_rhw && data)
@@ -451,6 +508,7 @@ HRESULT STDMETHODCALLTYPE HookSetFVF(IDirect3DDevice9* d, DWORD fvf)
 {
     Trace(_AddressOfReturnAddress(), "SetFVF(0x%x)", fvf);
     g_position_rhw = (fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
+    g_fvf = fvf;
     return g_real_SetFVF(d, fvf);
 }
 
@@ -563,6 +621,17 @@ void AppendExeCallers(char* line, size_t size, const void* stack_top, int max_fr
             ++found;
         }
     }
+}
+
+void SetDrawProbe(void (*probe)())
+{
+    g_draw_probe = probe;
+}
+
+void SetGeometryCapture(FILE* file)
+{
+    g_capture = file;
+    g_capture_draw = 0;
 }
 
 void FrameTraceOnPresent()

@@ -238,6 +238,19 @@ int EngineArmObject()
     return arm ? arm[1] : 0;
 }
 
+int EngineLimbMode()
+{
+    if (!g_base)
+        return 0xff;
+    int mode = *reinterpret_cast<int*>(g_base + 0x4717f8);
+    static int last = -1;
+    if (mode != last) {
+        Log("Limb mode -> %d", mode);
+        last = mode;
+    }
+    return mode;
+}
+
 unsigned char* EngineRenderContext()
 {
     return g_base ? *reinterpret_cast<unsigned char**>(g_base + 0x6ac0c8) : nullptr;

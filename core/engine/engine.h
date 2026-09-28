@@ -70,6 +70,10 @@ unsigned char* EngineObjectPosition(int obj);
 // The active render context (DAT_00aac0c8), or null outside rendering.
 unsigned char* EngineRenderContext();
 
+// The player's current limb mode (DAT_008717f8): which first-person arm is
+// out (0xff = none; 4 = carrying a body). Changes are logged.
+int EngineLimbMode();
+
 // Sets the player's look pitch (radians, positive = down) for the next
 // player-camera update; aim and frob use it. Call every frame to keep it set.
 void EngineSetLookPitch(float radians);

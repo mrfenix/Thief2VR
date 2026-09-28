@@ -157,15 +157,22 @@ void XrInput::Update(XrTime display_time, XrControllerState& s)
         s.grip[hand] = flt(grip_, hand_path_[hand]);
         s.stick_click[hand] = boolean(stick_click_, hand_path_[hand]);
 
-        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        XrSpaceVelocity vel{XR_TYPE_SPACE_VELOCITY};
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION, &vel};
         const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
         if (grip_space_[hand] &&
             XR_SUCCEEDED(xrLocateSpace(grip_space_[hand], Xr().local_space(), display_time, &loc)) &&
             (loc.locationFlags & need) == need) {
             s.grip_pose[hand] = loc.pose;
             s.pose_valid[hand] = true;
+            const XrSpaceVelocityFlags vneed = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+            if ((vel.velocityFlags & vneed) == vneed) {
+                s.linear_velocity[hand] = vel.linearVelocity;
+                s.angular_velocity[hand] = vel.angularVelocity;
+                s.velocity_valid[hand] = true;
+            }
         }
-        loc = {XR_TYPE_SPACE_LOCATION};
+        loc = {XR_TYPE_SPACE_LOCATION};  // no velocity chained for the aim pose
         if (aim_space_[hand] &&
             XR_SUCCEEDED(xrLocateSpace(aim_space_[hand], Xr().local_space(), display_time, &loc)) &&
             (loc.locationFlags & need) == need)

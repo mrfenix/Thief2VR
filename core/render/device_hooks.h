@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d9.h>
+#include <cstdio>
 
 // All IDirect3DDevice9 method hooks except Present/Reset (d3d9_hooks.cpp):
 //  - scene redirect: while active, the engine's drawing goes to our eye render
@@ -22,6 +23,14 @@ void EndSceneRedirect(IDirect3DDevice9* device);
 
 // Called from the Present hook once per frame (F9 trace).
 void FrameTraceOnPresent();
+
+// Calls probe once, at the next draw call (then clears it). Pass nullptr to
+// cancel. Used to inspect engine state in the middle of a specific draw.
+void SetDrawProbe(void (*probe)());
+
+// While non-null, every pre-transformed triangle drawn is written to the file
+// as "draw x0 y0 u0 v0 x1 y1 u1 v1 x2 y2 u2 v2" (screen x/y, texture u/v).
+void SetGeometryCapture(FILE* file);
 
 // Appends up to max_frames exe return addresses found on the stack above
 // stack_top to line (reverse-engineering aid).

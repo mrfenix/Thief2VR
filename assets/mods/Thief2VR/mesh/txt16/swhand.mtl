@@ -1,0 +1,6 @@
+; Thief2VR: hides the first-person arm and hand, so only the sword shows in VR
+; (held by your controller). swhand.png is the original texture atlas with
+; everything but the sword strip (left edge: hilt wrap + blade) made
+; transparent. Alpha keying discards those pixels instead of blending them, so
+; the invisible arm doesn't hide the sword through the depth buffer.
+force_alpha_key 1

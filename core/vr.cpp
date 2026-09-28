@@ -355,6 +355,12 @@ bool VrOnPresent(IDirect3DDevice9* device)
 
     EngineTraceTick();
 
+    static bool f12_was_down;
+    bool f12_down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    if (f12_down && !f12_was_down)
+        StereoRequestArmDump();
+    f12_was_down = f12_down;
+
     static bool f7_was_down;
     bool f7_down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
     if (f7_down && !f7_was_down) {

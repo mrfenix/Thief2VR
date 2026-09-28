@@ -24,9 +24,14 @@
     X(bool, aim_follows_head, true, 0, 1, "Movement", "Aim / frob follow the head (when not aiming by hand)")    \
     X(bool, aim_with_hand, true, 0, 1, "Hands", "Aim, frob and weapons follow the right hand")                  \
     X(bool, weapon_in_hand, true, 0, 1, "Hands", "Hold the weapon in your hand (off = in front of the view)")   \
+    X(bool, swing_to_attack, true, 0, 1, "Hands", "Swing the sword / blackjack to attack")                       \
+    X(float, swing_speed, 2.5f, 1.0f, 6.0f, "Hands", "Swing speed needed to attack (m/s at the blade tip)")    \
     X(float, grip_forward_ft, 1.2f, -1.0f, 4.0f, "Hands", "Weapon grip: forward of the view (ft)")              \
     X(float, grip_right_ft, 0.5f, -2.0f, 2.0f, "Hands", "Weapon grip: right of the view (ft)")                   \
     X(float, grip_down_ft, 0.9f, -1.0f, 4.0f, "Hands", "Weapon grip: below the view (ft)")                      \
+    X(float, weapon_pitch_deg, 0.0f, -90.0f, 90.0f, "Hands", "Weapon angle: pitch (deg)")                        \
+    X(float, weapon_yaw_deg, 0.0f, -90.0f, 90.0f, "Hands", "Weapon angle: yaw (deg)")                            \
+    X(float, weapon_roll_deg, 0.0f, -180.0f, 180.0f, "Hands", "Weapon angle: roll (deg)")                        \
     X(bool, physical_crouch, true, 0, 1, "Movement", "Crouch by physically crouching")                          \
     X(float, physical_crouch_ft, 1.0f, 0.3f, 3.0f, "Movement", "Physical crouch depth (ft)")                    \
     X(bool, physical_lean, true, 0, 1, "Movement", "Lean by physically leaning")                                \

@@ -22,14 +22,18 @@ void* g_trampoline;  // MinHook's copy of the original scene render entry
 // The first-person arm is drawn by a render hook at the end of the world render
 // (FUN_004dad50 -> [0xbe7268] = FUN_00463c60), so once per eye pass. The arm is
 // a creature placed (in the game update) relative to the game camera G. To show
-// it in the hand H instead, its draw uses a substituted render camera:
-//   world->view T' = T_eye o H o G^-1
-// The render context's camera transform is at +0x44 (row-major rotation M,
-// 9 floats) with an origin at +0x68 (logged as 0). Empirically (tested in the
-// headset) this places the arm:
-//   M' = M_eye R_H R_G^T,   origin' = p_G - R_G R_H^T (p_H - origin)
-// with the hand's roll negated in R_H and the hand's forward/back offset
-// mirrored (both otherwise show reversed).
+// it in the hand H instead, its draw gets an extra world-space transform:
+//   x' = p_H + D (x - p_G),   D = R_H R_G^T
+// i.e. the arm moved rigidly from the game camera into the hand.
+// Render context (measured with the F12 dump, see docs/re-map.md), reading the
+// 9 floats row by row into M:
+//   +0x78: camera C + t at +0x9c, applied as view = C^T x + t (t = -C^T eye).
+//   +0x44: the current object's transform M + o at +0x68, same layout:
+//          x_world = M^T x + o. Identity/0 for the arm (creature vertices are
+//          already in world space).
+// So for the arm's draw:  M' = M D^T,   o' = p_H + D (o - p_G).
+// (The first version used M' = D, o' = p_G - D^T p_H, which is the INVERSE
+// move: that's why roll and forward/back showed reversed.)
 void* g_arm_trampoline;
 bool g_arm_override;   // set for the eye passes of this frame
 Mat3 g_arm_rg, g_arm_rh;
@@ -38,8 +42,65 @@ Vec3 g_arm_pg, g_arm_ph;
 // Diagnostics (logged every ~2 s): arm draws seen / adjusted.
 int g_arm_draws, g_arm_adjusted;
 
+// F12 arm-transform dump: for one frame the arm is drawn unmodified, and at its
+// first draw call in each eye the render context and related state are logged.
+bool g_arm_dump_requested, g_arm_dump_active, g_arm_dump_captured;
+EnginePosition g_dump_eye;
+
+// Opens thief2vr_arm_tris.txt next to the exe (the arm's triangles, see SetGeometryCapture).
+FILE* OpenArmCaptureFile()
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\' && path[n - 1] != '/')
+        --n;
+    path[n] = 0;
+    strncat_s(path, "thief2vr_arm_tris.txt", _TRUNCATE);
+    FILE* f = nullptr;
+    fopen_s(&f, path, "w");
+    Log("ArmDump: writing arm triangles to %s (%s)", path, f ? "ok" : "failed");
+    return f;
+}
+
+void DumpArmContext()
+{
+    const EnginePosition& e = g_dump_eye;
+    Log("ArmDump: eye (%.3f %.3f %.3f) bank/pitch/heading %u %u %u", e.x, e.y, e.z, e.bank, e.pitch, e.heading);
+    if (int* cam = *Engine().current_camera) {
+        const float* c = reinterpret_cast<const float*>(cam + 2);
+        const uint16_t* a = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
+        Log("ArmDump: game camera (%.3f %.3f %.3f) bank/pitch/heading %u %u %u", c[0], c[1], c[2], a[0], a[1], a[2]);
+    }
+    int arm = EngineArmObject();
+    if (unsigned char* ap = EngineObjectPosition(arm)) {
+        const float* p = reinterpret_cast<const float*>(ap);
+        const uint16_t* a = reinterpret_cast<const uint16_t*>(ap + 0x10);
+        Log("ArmDump: arm object %d at (%.3f %.3f %.3f) bank/pitch/heading %u %u %u", arm, p[0], p[1], p[2], a[0], a[1],
+            a[2]);
+    }
+    if (unsigned char* ctx = EngineRenderContext()) {
+        for (int off = 0; off < 0x200; off += 32) {
+            const float* f = reinterpret_cast<const float*>(ctx + off);
+            Log("ArmDump ctx+%03x: %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f", off, f[0], f[1], f[2], f[3],
+                f[4], f[5], f[6], f[7]);
+        }
+    }
+}
+
 void __cdecl ArmRenderDetour()
 {
+    if (g_arm_dump_active) {
+        FILE* capture = g_arm_dump_captured ? nullptr : OpenArmCaptureFile();  // first eye only
+        g_arm_dump_captured = true;
+        SetDrawProbe(&DumpArmContext);
+        SetGeometryCapture(capture);
+        reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
+        SetGeometryCapture(nullptr);
+        SetDrawProbe(nullptr);
+        if (capture)
+            fclose(capture);
+        return;
+    }
     ++g_arm_draws;
     unsigned char* ctx = g_arm_override ? EngineRenderContext() : nullptr;
     if (ctx)
@@ -57,8 +118,9 @@ void __cdecl ArmRenderDetour()
         for (int c = 0; c < 3; ++c)
             me.m[r][c] = block[r * 3 + c];
     Vec3 oe{block[9], block[10], block[11]};
-    Mat3 m = me * g_arm_rh * Transpose(g_arm_rg);
-    Vec3 o = g_arm_pg - g_arm_rg * (Transpose(g_arm_rh) * (g_arm_ph - oe));
+    Mat3 d = g_arm_rh * Transpose(g_arm_rg);
+    Mat3 m = me * Transpose(d);
+    Vec3 o = g_arm_ph + d * (oe - g_arm_pg);
 
     static int logged;
     if (logged++ < 2)
@@ -286,28 +348,26 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         const uint16_t* cam_ang = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
         g_arm_rg = RotZ(Angle16ToRad(cam_ang[2])) * RotY(Angle16ToRad(cam_ang[1])) * RotX(Angle16ToRad(cam_ang[0]));
         g_arm_pg = {cam_pos[0], cam_pos[1], cam_pos[2]};
-        {
-            float h, p, b;
-            ToHeadingPitchBank(world_yaw * unyaw * EngineOrientation(aim_pose.orientation), h, p, b);
-            g_arm_rh = RotZ(h) * RotY(p) * RotX(-b);  // roll negated, see above
-        }
+        // The hand's orientation, plus the user alignment (Hands tab) in the
+        // hand's frame, about the grip.
+        const float deg = kPi / 180.0f;
+        g_arm_rh = world_yaw * unyaw * EngineOrientation(aim_pose.orientation) *
+                   RotZ(Config().weapon_yaw_deg * deg) * RotY(Config().weapon_pitch_deg * deg) *
+                   RotX(Config().weapon_roll_deg * deg);
         // Place H so the arm's usual grip point (in view: forward/right/down)
         // lands on the controller.
         float hand[3];
         TrackedPointToCameraOffset(grip_pose.position, yaw, hand);
-        {
-            // Mirror the hand's forward/back offset (along the facing direction).
-            Vec3 local = Transpose(world_yaw) * Vec3{hand[0], hand[1], hand[2]};
-            local.x = -local.x;
-            Vec3 w = world_yaw * local;
-            hand[0] = w.x;
-            hand[1] = w.y;
-            hand[2] = w.z;
-        }
         Vec3 grip_in_view{Config().grip_forward_ft, -Config().grip_right_ft, -Config().grip_down_ft};
         g_arm_ph = g_arm_pg + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
         g_arm_override = true;
     }
+
+    g_arm_dump_active = g_arm_dump_requested;
+    g_arm_dump_requested = false;
+    g_arm_dump_captured = false;
+    if (g_arm_dump_active)
+        Log("ArmDump: ---- frame dump (arm drawn unmodified) ----");
 
     XrPosef poses[2];
     for (int eye = 0; eye < 2; ++eye) {
@@ -333,12 +393,14 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         p.pitch = RadToAngle16(pitch);
         p.bank = RadToAngle16(bank);
         *pos = p;
+        g_dump_eye = p;
 
         BeginSceneRedirect(dev, g_eyes.color[eye], g_eye_depth);
         CallOriginal(pos, eye_focal);
         EndSceneRedirect(dev);
     }
     *pos = body;
+    g_arm_dump_active = false;
 
     static double last_arm_log;
     double now = VrNowMs();
@@ -406,6 +468,11 @@ void StereoRequestRecenter()
 const HeadState& CurrentHeadState()
 {
     return g_head;
+}
+
+void StereoRequestArmDump()
+{
+    g_arm_dump_requested = true;
 }
 
 bool TrackedPointToCameraOffset(const XrVector3f& point, float world_yaw, float out[3])

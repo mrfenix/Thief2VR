@@ -18,6 +18,10 @@ struct XrControllerState {
     XrPosef grip_pose[2]{};
     XrPosef aim_pose[2]{};
     bool pose_valid[2] = {};
+    // Grip velocities in LOCAL space (m/s, rad/s), when the runtime provides them.
+    XrVector3f linear_velocity[2]{};
+    XrVector3f angular_velocity[2]{};
+    bool velocity_valid[2] = {};
 };
 
 class XrInput {

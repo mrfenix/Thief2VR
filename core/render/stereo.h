@@ -21,6 +21,9 @@ void StereoOnDeviceReset();
 // Re-capture the neutral head position and forward direction on the next frame.
 void StereoRequestRecenter();
 
+// F12: log the render state during the next frame's (unmodified) arm draws.
+void StereoRequestArmDump();
+
 // Head and body state from the last rendered frame (for the VR controls).
 // Angles in radians, engine convention: heading CCW, pitch positive = down.
 struct HeadState {
