@@ -1,0 +1,5 @@
+build/
+re/
+.vs/
+*.user
+*.log

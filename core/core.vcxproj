@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{6B1F4C1E-2A63-4C1B-9E4E-0D3D9A0C0002}</ProjectGuid>
+    <RootNamespace>core</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.17763.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="..\common.props" />
+  <PropertyGroup>
+    <TargetName>thief2vr</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);..\third_party\minhook\include;..\third_party\openxr\include;..\third_party\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>d3d9.lib;d3d11.lib;dxgi.lib;openxr_loader.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\third_party\openxr\Win32\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- A missing openxr_loader.dll must not stop the game from starting. -->
+      <DelayLoadDLLs>openxr_loader.dll;d3d11.dll;dxgi.dll</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="log.cpp" />
+    <ClCompile Include="config\settings.cpp" />
+    <ClCompile Include="engine\build_id.cpp" />
+    <ClCompile Include="engine\engine.cpp" />
+    <ClCompile Include="render\stereo.cpp" />
+    <ClCompile Include="render\d3d9_hooks.cpp" />
+    <ClCompile Include="render\device_hooks.cpp" />
+    <ClCompile Include="render\frame_transfer.cpp" />
+    <ClCompile Include="vr.cpp" />
+    <ClCompile Include="xr\xr_system.cpp" />
+    <ClCompile Include="xr\xr_input.cpp" />
+    <ClCompile Include="input\vr_controls.cpp" />
+    <ClCompile Include="ui\vr_menu.cpp" />
+    <!-- Dear ImGui (VR settings menu) -->
+    <ClCompile Include="..\third_party\imgui\imgui.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="..\third_party\imgui\backends\imgui_impl_dx11.cpp" />
+    <!-- MinHook, compiled in directly -->
+    <ClCompile Include="..\third_party\minhook\src\buffer.c" />
+    <ClCompile Include="..\third_party\minhook\src\hook.c" />
+    <ClCompile Include="..\third_party\minhook\src\trampoline.c" />
+    <ClCompile Include="..\third_party\minhook\src\hde\hde32.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="log.h" />
+    <ClInclude Include="config\settings.h" />
+    <ClInclude Include="engine\build_id.h" />
+    <ClInclude Include="engine\engine.h" />
+    <ClInclude Include="render\stereo.h" />
+    <ClInclude Include="vrmath.h" />
+    <ClInclude Include="render\d3d9_hooks.h" />
+    <ClInclude Include="render\device_hooks.h" />
+    <ClInclude Include="render\frame_transfer.h" />
+    <ClInclude Include="vr.h" />
+    <ClInclude Include="xr\xr_system.h" />
+    <ClInclude Include="xr\xr_input.h" />
+    <ClInclude Include="input\vr_controls.h" />
+    <ClInclude Include="ui\vr_menu.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

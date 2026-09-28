@@ -1,0 +1,284 @@
+#include "vr_menu.h"
+
+#include "../config/settings.h"
+#include "../log.h"
+#include "../render/stereo.h"
+#include "../vr.h"
+#include "../vrmath.h"
+
+#include <imgui.h>
+#include <backends/imgui_impl_dx11.h>
+
+#include <cfloat>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+constexpr int kTexW = 1280;
+constexpr int kTexH = 960;
+constexpr float kWidthM = 0.8f;      // panel width in metres
+constexpr float kDistanceM = 0.8f;   // in front of the head when opened
+constexpr float kDropM = 0.1f;       // below eye height
+
+bool g_ready;
+bool g_failed;
+bool g_open;
+XrPosef g_pose;
+ID3D11Texture2D* g_tex;
+ID3D11RenderTargetView* g_rtv;
+XrSwapchainD3D11 g_swapchain;
+bool g_trigger_down;
+bool g_b_was_down;
+bool g_close_requested;
+
+bool Init()
+{
+    if (g_ready || g_failed)
+        return g_ready;
+    g_failed = true;
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = kTexW;
+    td.Height = kTexH;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    // Same byte layout as the swapchain's sRGB format, so a raw copy is correct.
+    td.Format = Xr().color_format_is_rgba() ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(Xr().device()->CreateTexture2D(&td, nullptr, &g_tex)) ||
+        FAILED(Xr().device()->CreateRenderTargetView(g_tex, nullptr, &g_rtv)) ||
+        !g_swapchain.Create(Xr().session(), Xr().color_format(), kTexW, kTexH)) {
+        Log("Menu: could not create its render target");
+        return false;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2((float)kTexW, (float)kTexH);
+    io.MouseDrawCursor = true;  // the pointer is drawn into the panel
+    ImFontConfig font;
+    font.SizePixels = 30.0f;
+    io.Fonts->AddFontDefault(&font);
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(1.6f);
+    style.WindowRounding = 12.0f;
+    style.FrameRounding = 6.0f;
+    style.GrabMinSize = 30.0f;
+    style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    if (!ImGui_ImplDX11_Init(Xr().device(), Xr().context())) {
+        Log("Menu: ImGui DX11 backend init failed");
+        return false;
+    }
+    g_failed = false;
+    g_ready = true;
+    Log("Menu: ready");
+    return true;
+}
+
+// Where the right controller's aim ray hits the panel, in pixels (false if it misses).
+bool PointerOnPanel(const XrControllerState& c, ImVec2& out)
+{
+    if (!c.pose_valid[1])
+        return false;
+    const XrPosef& aim = c.aim_pose[1];
+    Quat qa{aim.orientation.x, aim.orientation.y, aim.orientation.z, aim.orientation.w};
+    Vec3 o{aim.position.x, aim.position.y, aim.position.z};
+    Vec3 d = Rotate(qa, {0, 0, -1});
+
+    Quat qp{g_pose.orientation.x, g_pose.orientation.y, g_pose.orientation.z, g_pose.orientation.w};
+    Vec3 center{g_pose.position.x, g_pose.position.y, g_pose.position.z};
+    Vec3 n = Rotate(qp, {0, 0, 1});  // the panel faces +Z, towards the player
+    float denom = Dot(d, n);
+    if (denom > -1e-4f)
+        return false;
+    float t = Dot(center - o, n) / denom;
+    if (t < 0)
+        return false;
+    Vec3 local = Rotate(Conjugate(qp), (o + d * t) - center);
+    float height_m = kWidthM * kTexH / kTexW;
+    float u = (local.x / kWidthM + 0.5f) * kTexW;
+    float v = (0.5f - local.y / height_m) * kTexH;
+    if (u < 0 || v < 0 || u > kTexW || v > kTexH)
+        return false;
+    out = ImVec2(u, v);
+    return true;
+}
+
+void SettingWidget(const SettingInfo& s)
+{
+    ImGui::PushID(s.name);
+    switch (s.type) {
+    case SettingType::Bool:
+        ImGui::Checkbox(s.label, static_cast<bool*>(s.value));
+        break;
+    case SettingType::Float:
+        ImGui::SetNextItemWidth(520);
+        ImGui::SliderFloat(s.label, static_cast<float*>(s.value), s.lo, s.hi, "%.2f");
+        break;
+    case SettingType::Int:
+        ImGui::SetNextItemWidth(520);
+        ImGui::SliderInt(s.label, static_cast<int*>(s.value), (int)s.lo, (int)s.hi);
+        break;
+    }
+    ImGui::PopID();
+}
+
+void BuildUi()
+{
+    int count;
+    const SettingInfo* settings = AllSettings(count);
+
+    // Tabs in declaration order, with Performance last.
+    std::vector<const char*> tabs;
+    for (int i = 0; i < count; ++i) {
+        bool known = false;
+        for (const char* t : tabs)
+            known |= strcmp(t, settings[i].tab) == 0;
+        if (!known && strcmp(settings[i].tab, "Performance") != 0)
+            tabs.push_back(settings[i].tab);
+    }
+    tabs.push_back("Performance");
+
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("Thief2VR", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoCollapse);
+    ImGui::Text("Thief2VR settings");
+    ImGui::SameLine(ImGui::GetWindowWidth() - 190);
+    if (ImGui::Button("Close", ImVec2(160, 0)))
+        g_close_requested = true;
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("tabs")) {
+        for (const char* tab : tabs) {
+            if (!ImGui::BeginTabItem(tab))
+                continue;
+            ImGui::BeginChild("items", ImVec2(0, -80));
+            for (int i = 0; i < count; ++i)
+                if (strcmp(settings[i].tab, tab) == 0)
+                    SettingWidget(settings[i]);
+            if (strcmp(tab, "Performance") == 0) {
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", VrTimingSummary());
+            }
+            ImGui::EndChild();
+            if (ImGui::Button("Reset this tab to defaults"))
+                ResetSettingsTab(tab);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Recenter view"))
+        StereoRequestRecenter();
+    ImGui::End();
+}
+
+void Close()
+{
+    g_open = false;
+    SaveSettings();
+    Log("Menu: closed, settings saved");
+}
+
+} // namespace
+
+bool MenuIsOpen()
+{
+    return g_open;
+}
+
+void MenuToggle(const XrFrame& frame)
+{
+    if (g_open) {
+        Close();
+        return;
+    }
+    if (!Init())
+        return;
+
+    // World-locked, level, in front of where the head is looking.
+    const XrPosef& eye = frame.views[0].pose;
+    Vec3 head{(frame.views[0].pose.position.x + frame.views[1].pose.position.x) * 0.5f,
+              (frame.views[0].pose.position.y + frame.views[1].pose.position.y) * 0.5f,
+              (frame.views[0].pose.position.z + frame.views[1].pose.position.z) * 0.5f};
+    Vec3 fwd = Rotate({eye.orientation.x, eye.orientation.y, eye.orientation.z, eye.orientation.w}, {0, 0, -1});
+    float yaw = std::atan2(-fwd.x, -fwd.z);
+    Quat q = YawQuat(yaw);
+    Vec3 pos = head + Rotate(q, {0, -kDropM, -kDistanceM});
+    g_pose.orientation = {q.x, q.y, q.z, q.w};
+    g_pose.position = {pos.x, pos.y, pos.z};
+
+    g_open = true;
+    g_close_requested = false;
+    g_trigger_down = false;
+    g_b_was_down = true;  // don't let the press that opened it close it
+    Log("Menu: opened");
+}
+
+bool MenuUpdate(const XrControllerState& c, double dt, XrCompositionLayerQuad& quad)
+{
+    if (!g_open || !g_ready)
+        return false;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DeltaTime = (float)(dt > 0.001 ? dt : 0.001);
+    ImVec2 pointer;
+    if (c.active && PointerOnPanel(c, pointer))
+        io.AddMousePosEvent(pointer.x, pointer.y);
+    else
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    bool trigger = g_trigger_down ? c.trigger[1] > 0.4f : c.trigger[1] > 0.6f;
+    if (trigger != g_trigger_down) {
+        io.AddMouseButtonEvent(0, trigger);
+        g_trigger_down = trigger;
+        if (trigger)
+            XrControls().Vibrate(1, 0.15f, 0.02f);
+    }
+    if (std::fabs(c.turn.y) > 0.2f)
+        io.AddMouseWheelEvent(0, c.turn.y * (float)dt * 10.0f);
+    if (c.b && !g_b_was_down)
+        g_close_requested = true;
+    g_b_was_down = c.b;
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui::NewFrame();
+    BuildUi();
+    ImGui::Render();
+
+    ID3D11DeviceContext* ctx = Xr().context();
+    const float clear[4] = {0, 0, 0, 0};
+    ctx->ClearRenderTargetView(g_rtv, clear);
+    ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+    D3D11_VIEWPORT vp{0, 0, (float)kTexW, (float)kTexH, 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+    if (ID3D11Texture2D* image = g_swapchain.Acquire()) {
+        ctx->CopyResource(image, g_tex);
+        g_swapchain.Release();
+    }
+
+    if (g_close_requested) {
+        Close();
+        return false;
+    }
+
+    quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = Xr().local_space();
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.subImage.swapchain = g_swapchain.handle();
+    quad.subImage.imageRect = {{0, 0}, {kTexW, kTexH}};
+    quad.pose = g_pose;
+    quad.size = {kWidthM, kWidthM * kTexH / kTexW};
+    return true;
+}
