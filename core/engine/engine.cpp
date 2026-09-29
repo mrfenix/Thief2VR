@@ -17,6 +17,7 @@ static void* g_camera_update_trampoline;
 static void __cdecl CameraUpdateDetour();
 static void* g_objpos_update_trampoline;
 static void ObjPosUpdateDetour();
+static void InstallWeaponHooks();
 
 namespace {
 
@@ -225,6 +226,7 @@ bool ResolveEngine()
                           &g_objpos_update_trampoline) == MH_OK) {
             MH_EnableHook(objpos_update);
         }
+        InstallWeaponHooks();
     } else {
         Log("Engine: player input signatures mismatch, VR controls disabled");
     }
@@ -465,4 +467,422 @@ void EngineSetLookPitch(float radians)
     const float limit = 80.0f * 3.14159265f / 180.0f;
     g_look_pitch = radians > limit ? limit : radians < -limit ? -limit : radians;
     g_have_pitch = g_camera_update_trampoline != nullptr;
+}
+
+// --- Player melee weapon: hit spheres -------------------------------------
+// FUN_0055fcd0 (a creature method, __thiscall(creature, weapon obj, weapon
+// index), RET 8) places a creature's weapon physics spheres each frame. Each
+// sphere sits between two of the creature's joints (world space, creature
+// +0x19c) per the creature type's weapon table, and is set with
+// FUN_00537270 (cdecl(obj, sphere index), point in EDI). The spheres only have
+// physics (and so hit things) while the weapon is swinging.
+
+namespace {
+
+void* g_weapon_update_trampoline;
+void* g_sphere_set_trampoline;
+int g_player_weapon_in_update;  // weapon obj while the player's arm is placing its spheres, else 0
+WeaponPointTransform g_weapon_transform;
+unsigned char* g_arm_creature_seen;  // `this` of the last arm weapon update (diagnostics)
+
+// Snapshot of the arm's last weapon update (for the F12 dump / logging).
+constexpr int kMaxJoints = 24, kMaxSpheres = 8;
+struct ArmWeaponState {
+    bool valid = false;
+    int weapon = 0, spheres = 0;
+    int joint_a[kMaxSpheres], joint_b[kMaxSpheres];
+    float t[kMaxSpheres], radius[kMaxSpheres];
+    float joints[kMaxJoints][3];
+    int joints_read = 0;
+    bool physical = false;
+} g_arm_weapon;
+
+void SnapshotArmWeapon(unsigned char* creature, int weapon, int index)
+{
+    ArmWeaponState& a = g_arm_weapon;
+    a.valid = false;
+    a.weapon = weapon;
+    a.spheres = 0;
+    a.joints_read = 0;
+    __try {
+        int type = *reinterpret_cast<int*>(creature + 0x38);
+        unsigned char* desc = *reinterpret_cast<unsigned char**>(
+            *reinterpret_cast<uintptr_t*>(g_base + 0x6a1554) + type * 4);  // DAT_00aa1554[type]
+        unsigned char* table = desc ? *reinterpret_cast<unsigned char**>(desc + 0x3c) : nullptr;
+        if (table && index >= 0) {
+            int count = *reinterpret_cast<int*>(table + index * 8);
+            const int* e = *reinterpret_cast<int**>(table + index * 8 + 4);
+            for (int i = 0; e && i < count && i < kMaxSpheres; ++i, e += 5) {
+                a.joint_a[i] = e[0];
+                a.joint_b[i] = e[1];
+                a.t[i] = reinterpret_cast<const float*>(e)[2];
+                a.radius[i] = reinterpret_cast<const float*>(e)[3];
+                a.spheres = i + 1;
+            }
+        }
+        const float* joints = *reinterpret_cast<float**>(creature + 0x19c);
+        for (int j = 0; joints && j < kMaxJoints; ++j) {
+            a.joints[j][0] = joints[j * 3];
+            a.joints[j][1] = joints[j * 3 + 1];
+            a.joints[j][2] = joints[j * 3 + 2];
+            a.joints_read = j + 1;
+        }
+        a.valid = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int weapon, int index)
+{
+    auto original = reinterpret_cast<bool(__fastcall*)(unsigned char*, void*, int, int)>(g_weapon_update_trampoline);
+    int owner = *reinterpret_cast<int*>(creature + 8);
+    int arm = EngineArmObject();
+    if (!arm || owner != arm || weapon <= 0)
+        return original(creature, nullptr, weapon, index);
+
+    SnapshotArmWeapon(creature, weapon, index);
+    g_arm_creature_seen = creature;
+    g_player_weapon_in_update = g_weapon_transform ? weapon : 0;
+    bool result = original(creature, nullptr, weapon, index);
+    g_player_weapon_in_update = 0;
+
+    bool physical = g_get_phys_model && g_get_phys_model(weapon) != nullptr;
+    if (physical != g_arm_weapon.physical)
+        Log("Weapon: %d %s (%d hit spheres)", weapon, physical ? "swinging, hits enabled" : "hits disabled",
+            g_arm_weapon.spheres);
+    g_arm_weapon.physical = physical;
+    return result;
+}
+
+void __cdecl TransformWeaponPoint(float* point)
+{
+    if (g_weapon_transform)
+        g_weapon_transform(point);
+}
+
+__declspec(naked) void SphereSetDetour()
+{
+    __asm {
+        mov eax, [esp + 4]  // object
+        test eax, eax
+        je passthrough
+        cmp eax, dword ptr [g_player_weapon_in_update]
+        jne passthrough
+        pushad
+        push edi            // the sphere's position (world), changed in place
+        call TransformWeaponPoint
+        add esp, 4
+        popad
+    passthrough:
+        jmp dword ptr [g_sphere_set_trampoline]
+    }
+}
+
+// --- VR melee timing ---
+// The arm animation normally switches the weapon's hits on and off through
+// motion-flag callbacks registered by the attack start (FUN_0046c950):
+//   0x1000 -> 0x0046c460 -> FUN_0055aab0: creature->MakeWeaponPhysical(weapon)
+//   0x2000 -> 0x0046c490 -> FUN_0055ab00: creature->MakeWeaponNonPhysical(weapon)
+// (both: EAX = creature object, ESI = weapon). With VR melee on, those two
+// callbacks are ignored and the swing opens/closes the hit window instead.
+bool g_vr_melee;
+void* g_anim_hits_on_trampoline;
+void* g_anim_hits_off_trampoline;
+unsigned char* g_cur_weapon_fn;    // FUN_0059db80: weapon obj(owner /*EDX*/)
+unsigned char* g_weapon_on_fn;     // FUN_0055aab0
+unsigned char* g_weapon_off_fn;    // FUN_0055ab00
+int g_strike_arm, g_strike_weapon;  // the open window, or 0
+
+int __cdecl AnimHitsOnDetour(int creature_obj)
+{
+    if (g_vr_melee)
+        return 0;
+    return reinterpret_cast<int(__cdecl*)(int)>(g_anim_hits_on_trampoline)(creature_obj);
+}
+
+void __cdecl AnimHitsOffDetour(int creature_obj)
+{
+    if (g_vr_melee)
+        return;
+    reinterpret_cast<void(__cdecl*)(int)>(g_anim_hits_off_trampoline)(creature_obj);
+}
+
+// FUN_0059db80 uses a custom register convention and doesn't preserve the
+// callee-saved registers, so all of them are saved around the call.
+__declspec(naked) int __cdecl CallCurWeapon(int /*owner*/)
+{
+    __asm {
+        push ebx
+        push esi
+        push edi
+        push ebp
+        mov ebp, esp
+        mov edx, [ebp + 20]
+        xor ecx, ecx
+        call dword ptr [g_cur_weapon_fn]
+        mov esp, ebp
+        pop ebp
+        pop edi
+        pop esi
+        pop ebx
+        ret
+    }
+}
+
+// fn(EAX = creature obj, ESI = weapon)
+__declspec(naked) int __cdecl CallCreatureWeapon(void* /*fn*/, int /*creature_obj*/, int /*weapon*/)
+{
+    __asm {
+        push esi
+        push ebx
+        push edi
+        push ebp
+        mov eax, [esp + 24]
+        mov esi, [esp + 28]
+        call dword ptr [esp + 20]
+        pop ebp
+        pop edi
+        pop ebx
+        pop esi
+        ret
+    }
+}
+
+// --- Hit logging (diagnostics) ---
+// The damage model (IDamageModel, from AppGetObj FUN_00677250 with the IID at
+// 0x007e72d0): slot 3 HandleImpact, 4 DamageObject, 5 SlayObject, all
+// (this, victim, culprit, data, ...). Logged when the player's weapon, arm or
+// the player is involved, or within 1 s of a VR hit window.
+void* g_dmg_tramp[3];
+ULONGLONG g_last_strike_ms;
+
+void __cdecl LogDamageCall(int slot, int victim, int culprit, const int* data)
+{
+    int player = g_player_object ? *g_player_object : 0;
+    int arm = EngineArmObject();
+    bool related = culprit == player || culprit == arm || culprit == g_strike_weapon ||
+                   GetTickCount64() - g_last_strike_ms < 1000;
+    if (!related)
+        return;
+    static const char* names[] = {"HandleImpact", "DamageObject", "SlayObject"};
+    int d0 = 0, d1 = 0;
+    __try {
+        if (data) {
+            d0 = data[0];
+            d1 = data[1];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    Log("Hit: %s victim %d culprit %d (player %d, arm %d, weapon %d) data %d %d / %.2f", names[slot - 3], victim,
+        culprit, player, arm, g_strike_weapon, d0, d1, *reinterpret_cast<float*>(&d0));
+}
+
+#define DAMAGE_THUNK(n)                                                                                       __declspec(naked) void DamageThunk##n()                                                                   {                                                                                                             __asm pushad                                                                                              __asm push dword ptr [esp + 48]                                                                           __asm push dword ptr [esp + 48]                                                                           __asm push dword ptr [esp + 48]                                                                           __asm push n                                                                                              __asm call LogDamageCall                                                                                  __asm add esp, 16                                                                                         __asm popad                                                                                               __asm jmp dword ptr [g_dmg_tramp + (n - 3) * 4]                                                       }
+DAMAGE_THUNK(3)
+DAMAGE_THUNK(4)
+DAMAGE_THUNK(5)
+
+// Calls an engine function fn(arg), saving every register and restoring the
+// stack pointer afterwards, so it works whether fn pops its argument (stdcall,
+// like AppGetObj: RET 4) or not, and whether or not it preserves registers.
+__declspec(naked) void* __cdecl CallEngine1(void* /*fn*/, const void* /*arg*/)
+{
+    __asm {
+        push ebx
+        push esi
+        push edi
+        push ebp
+        mov ebp, esp
+        push dword ptr [ebp + 24]
+        call dword ptr [ebp + 20]
+        mov esp, ebp
+        pop ebp
+        pop edi
+        pop esi
+        pop ebx
+        ret
+    }
+}
+
+void InstallDamageLogging()
+{
+    static bool tried;
+    if (tried)
+        return;
+    tried = true;
+    // AppGetObj (FUN_00677250) with the damage model's IID.
+    void** model = static_cast<void**>(CallEngine1(g_base + 0x277250, g_base + 0x3e72d0));
+    if (!model) {
+        Log("Hit logging: no damage model");
+        return;
+    }
+    void** vtable = reinterpret_cast<void**>(*model);
+    void* thunks[3] = {&DamageThunk3, &DamageThunk4, &DamageThunk5};
+    for (int i = 0; i < 3; ++i) {
+        MH_STATUS st = MH_CreateHook(vtable[3 + i], thunks[i], &g_dmg_tramp[i]);
+        if (st == MH_OK)
+            st = MH_EnableHook(vtable[3 + i]);
+        Log("Hit logging: damage model slot %d at %p: %s", 3 + i, vtable[3 + i], MH_StatusToString(st));
+    }
+    // AppGetObj added a reference; the damage model lives as long as the game.
+    reinterpret_cast<unsigned long(__stdcall*)(void*)>(vtable[2])(model);
+}
+
+} // namespace
+
+void EngineSetVrMelee(bool enabled)
+{
+    g_vr_melee = enabled && g_anim_hits_on_trampoline && g_anim_hits_off_trampoline;
+}
+
+bool EngineMeleeStrike(bool open)
+{
+    if (!g_vr_melee || !g_player_object)
+        return false;
+    if (!open) {
+        g_last_strike_ms = GetTickCount64();
+        if (g_strike_weapon)
+            CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
+        g_strike_arm = g_strike_weapon = 0;
+        return true;
+    }
+    // Only after the engine accepted the attack (released, swing pending).
+    int released = *reinterpret_cast<int*>(g_base + 0x490f94);  // DAT_00890f94
+    int arm = EngineArmObject();
+    int weapon = CallCurWeapon(*g_player_object);
+    if (!released || !arm || weapon <= 0) {
+        Log("Melee: strike not started (released %d, arm %d, weapon %d)", released, arm, weapon);
+        return false;
+    }
+    InstallDamageLogging();
+    g_last_strike_ms = GetTickCount64();
+    CallCreatureWeapon(g_weapon_on_fn, arm, weapon);
+    g_strike_arm = arm;
+    g_strike_weapon = weapon;
+    return true;
+}
+
+static void InstallWeaponHooks()
+{
+    unsigned char* update = g_base + 0x15fcd0;  // FUN_0055fcd0
+    unsigned char* set = g_base + 0x137270;     // FUN_00537270
+    if (!Matches(update, "55 8b ec 83 e4 f8 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec 90 00 00 00") ||
+        !Matches(set, "53 8b 5c 24 0c 55 8b 6c 24 0c 56 55 e8")) {
+        Log("Engine: weapon sphere signatures mismatch; melee hits stay where the game puts them");
+        return;
+    }
+    MH_STATUS st = MH_CreateHook(set, reinterpret_cast<void*>(&SphereSetDetour), &g_sphere_set_trampoline);
+    if (st == MH_OK)
+        st = MH_CreateHook(update, reinterpret_cast<void*>(&WeaponUpdateDetour), &g_weapon_update_trampoline);
+    if (st == MH_OK)
+        st = MH_EnableHook(set);
+    if (st == MH_OK)
+        st = MH_EnableHook(update);
+    Log("Engine: weapon sphere hooks %s", MH_StatusToString(st));
+
+    unsigned char* anim_on = g_base + 0x6c460;   // LAB_0046c460
+    unsigned char* anim_off = g_base + 0x6c490;  // LAB_0046c490
+    unsigned char* cur_weapon = g_base + 0x19db80;
+    unsigned char* weapon_on = g_base + 0x15aab0;
+    unsigned char* weapon_off = g_base + 0x15ab00;
+    if (!Matches(anim_on, "83 3d ?? ?? ?? ?? 00 75 21 83 3d ?? ?? ?? ?? 00 75 18 8b 15 ?? ?? ?? ?? 56 e8") ||
+        !Matches(anim_off, "8b 15 ?? ?? ?? ?? 56 e8 ?? ?? ?? ?? 8b f0 8b 44 24 08 e8") ||
+        !Matches(weapon_on, "85 f6 75 03 33 c0 c3 85 c0 74 f9 8b 0d") ||
+        !Matches(weapon_off, "85 f6 74 40 85 c0 74 3c 8b 0d")) {
+        Log("Engine: melee timing signatures mismatch; swings use the game's timing");
+        return;
+    }
+    g_cur_weapon_fn = cur_weapon;
+    g_weapon_on_fn = weapon_on;
+    g_weapon_off_fn = weapon_off;
+    st = MH_CreateHook(anim_on, reinterpret_cast<void*>(&AnimHitsOnDetour), &g_anim_hits_on_trampoline);
+    if (st == MH_OK)
+        st = MH_CreateHook(anim_off, reinterpret_cast<void*>(&AnimHitsOffDetour), &g_anim_hits_off_trampoline);
+    if (st == MH_OK)
+        st = MH_EnableHook(anim_on);
+    if (st == MH_OK)
+        st = MH_EnableHook(anim_off);
+    if (st != MH_OK)
+        g_anim_hits_on_trampoline = g_anim_hits_off_trampoline = nullptr;
+    Log("Engine: melee timing hooks %s", MH_StatusToString(st));
+}
+
+void EngineSetWeaponPointTransform(WeaponPointTransform transform)
+{
+    g_weapon_transform = transform;
+}
+
+// The creature for an object (as FUN_0055aab0 finds it), or null.
+static unsigned char* CreatureOf(int obj)
+{
+    __try {
+        unsigned char* sys = *reinterpret_cast<unsigned char**>(g_base + 0x59b8b0);  // DAT_0099b8b0
+        if (!sys || obj <= 0)
+            return nullptr;
+        void* mapper = sys + 0xe4;
+        auto index_of = reinterpret_cast<int(__fastcall*)(void*, void*, int)>(**reinterpret_cast<void***>(mapper));
+        int idx = index_of(mapper, nullptr, obj);
+        if (idx <= 0)
+            return nullptr;
+        unsigned char* entry = (*reinterpret_cast<unsigned char***>(sys + 0xd4))[idx];
+        return entry ? *reinterpret_cast<unsigned char**>(entry + 4) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool EngineArmJoints(float out[5][3])
+{
+    unsigned char* creature = CreatureOf(EngineArmObject());
+    if (!creature)
+        return false;
+    __try {
+        const float* joints = *reinterpret_cast<float**>(creature + 0x19c);
+        if (!joints)
+            return false;
+        for (int j = 0; j < 5; ++j)
+            for (int k = 0; k < 3; ++k) {
+                float v = joints[j * 3 + k];
+                if (!(v == v) || std::fabs(v - joints[k]) > 20.0f)  // NaN, or far from the arm's root
+                    return false;
+                out[j][k] = v;
+            }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool EngineMeleeBusy()
+{
+    // DAT_00890f9c winding up, DAT_00890f94 released, DAT_00890f98 swinging.
+    return g_base && (*reinterpret_cast<int*>(g_base + 0x490f9c) || *reinterpret_cast<int*>(g_base + 0x490f94) ||
+                      *reinterpret_cast<int*>(g_base + 0x490f98));
+}
+
+void EngineLogArmWeapon()
+{
+    int arm = EngineArmObject();
+    unsigned char* creature = CreatureOf(arm);
+    Log("ArmDump: arm %d creature %p (weapon update saw %p)", arm, creature, g_arm_creature_seen);
+    if (creature) {
+        __try {
+            const float* joints = *reinterpret_cast<float**>(creature + 0x19c);
+            for (int j = 0; joints && j < kMaxJoints; ++j)
+                Log("ArmDump:   joint now %2d (%.3f %.3f %.3f)", j, joints[j * 3], joints[j * 3 + 1], joints[j * 3 + 2]);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log("ArmDump:   joints unreadable");
+        }
+    }
+    const ArmWeaponState& a = g_arm_weapon;
+    if (!a.valid) {
+        Log("ArmDump: no weapon update seen for the arm");
+        return;
+    }
+    Log("ArmDump: last swing: weapon %d, %s, %d hit spheres", a.weapon, a.physical ? "physical" : "not physical", a.spheres);
+    for (int i = 0; i < a.spheres; ++i)
+        Log("ArmDump:   sphere %d: joints %d-%d t %.3f radius %.3f", i, a.joint_a[i], a.joint_b[i], a.t[i],
+            a.radius[i]);
+    for (int j = 0; j < a.joints_read; ++j)
+        Log("ArmDump:   joint at swing %2d (%.3f %.3f %.3f)", j, a.joints[j][0], a.joints[j][1], a.joints[j][2]);
 }

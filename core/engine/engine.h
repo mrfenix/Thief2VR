@@ -77,3 +77,26 @@ int EngineLimbMode();
 // Sets the player's look pitch (radians, positive = down) for the next
 // player-camera update; aim and frob use it. Call every frame to keep it set.
 void EngineSetLookPitch(float radians);
+
+// The player's melee weapon hit spheres. The engine places them each frame from
+// the first-person arm's joints (world space); the transform set here is applied
+// to each position so hits land where the weapon is drawn (nullptr = off).
+typedef void (*WeaponPointTransform)(float* point);
+void EngineSetWeaponPointTransform(WeaponPointTransform transform);
+
+// Logs the arm's weapon spheres and joint positions (F12 dump).
+void EngineLogArmWeapon();
+
+// VR melee: the swing decides when the weapon hits, not the arm animation.
+// While enabled, the animation's own hits-on/off callbacks are ignored and
+// EngineMeleeStrike opens (after the engine accepted a quick attack, i.e.
+// right after "use_weapon" was released) and closes the hit window.
+void EngineSetVrMelee(bool enabled);
+bool EngineMeleeStrike(bool open);
+
+// The first-person arm's 5 joints (world space; 0 = root, 3 = hand, 4 = the
+// weapon's tip), or false.
+bool EngineArmJoints(float out[5][3]);
+
+// True while a sword / blackjack attack is under way (wind-up to recovery).
+bool EngineMeleeBusy();

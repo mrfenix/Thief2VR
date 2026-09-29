@@ -40,6 +40,16 @@ HeldInput g_crouch_hold{"crouchhold"}, g_jump{"jump"}, g_lean_left{"leanleft"}, 
 Edge g_snap, g_crouch_toggle, g_run_toggle, g_map, g_a, g_b, g_x;
 bool g_run_on;
 bool g_moving;
+double g_strike_time = -1;  // seconds the melee hit window has been open, -1 closed
+
+void CloseStrike()
+{
+    if (g_strike_time >= 0) {
+        EngineMeleeStrike(false);
+        Log("Melee: hit window closed after %.2f s", g_strike_time);
+        g_strike_time = -1;
+    }
+}
 
 bool Analog(bool& state, float value)  // hysteresis: on above 0.6, off below 0.4
 {
@@ -55,6 +65,7 @@ void ReleaseAll()
         EngineSetMovement(0, 0);
         g_moving = false;
     }
+    CloseStrike();
 }
 
 XrVector2f Deadzone(XrVector2f v, float dz)
@@ -139,6 +150,7 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     //     Only for the sword / blackjack arm, never the bow or a carried body.
     // Limb modes (see docs/re-map.md): 1 = bow, 2 = sword / blackjack, 4 = body.
     static double swing_hold = 0, swing_cooldown = 0;
+    float tip_speed = 0;
     static Vec3 last_tip;
     static bool have_last_tip;
     swing_hold -= dt;
@@ -169,6 +181,7 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         }
         last_tip = tip;
         have_last_tip = true;
+        tip_speed = speed;
 
         if (s.swing_to_attack && melee && !rt && swing_cooldown <= 0 && speed > s.swing_speed) {
             swing_hold = 0.001;  // press for one frame, then release = quick swing
@@ -183,7 +196,26 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     bool weapon = Analog(rt, c.trigger[1]) || swing_hold > 0;
     if (weapon && !g_use_weapon.down)
         XrControls().Vibrate(1, 0.2f, 0.03f);
+    bool was_down = g_use_weapon.down;
     g_use_weapon.Set(weapon);
+
+    // --- Melee hit window: the weapon hits while your hand swings, not when
+    //     the arm animation says. Opens as the attack is released (the engine
+    //     has then registered it), stays open while the blade moves fast.
+    EngineSetVrMelee(s.swing_to_attack);
+    if (g_strike_time >= 0) {
+        g_strike_time += dt;
+        bool slowed = g_strike_time > 0.25 && tip_speed < s.swing_speed * 0.35f;
+        if (slowed || g_strike_time > 0.6 || !melee)
+            CloseStrike();
+    }
+    if (s.swing_to_attack && melee && was_down && !g_use_weapon.down) {
+        CloseStrike();
+        if (EngineMeleeStrike(true)) {
+            g_strike_time = 0;
+            Log("Melee: hit window open (tip %.1f m/s)", tip_speed);
+        }
+    }
     g_use_item.Set(Analog(rg, c.grip[1]));
     g_block.Set(Analog(lt, c.trigger[0]));
 

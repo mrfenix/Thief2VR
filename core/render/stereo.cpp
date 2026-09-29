@@ -32,12 +32,135 @@ void* g_trampoline;  // MinHook's copy of the original scene render entry
 //          x_world = M^T x + o. Identity/0 for the arm (creature vertices are
 //          already in world space).
 // So for the arm's draw:  M' = M D^T,   o' = p_H + D (o - p_G).
+// With the pinning correction C (see below) first: A = D Rc, b = p_H + D (tc - p_G),
+//   M' = M A^T,   o' = A o + b.
 // (The first version used M' = D, o' = p_G - D^T p_H, which is the INVERSE
 // move: that's why roll and forward/back showed reversed.)
 void* g_arm_trampoline;
 bool g_arm_override;   // set for the eye passes of this frame
 Mat3 g_arm_rg, g_arm_rh;
 Vec3 g_arm_pg, g_arm_ph;
+
+// Pinning: the attack animation moves the weapon away from the hand (wind-up
+// over the shoulder, the swing arc). While an attack is under way, a correction
+// C (x -> Rc x + tc) first moves the arm so the weapon is back where it was when
+// idle, relative to the game camera; then the move into the hand applies. The
+// weapon's frame comes from the arm's joints: origin = hand (3), x = towards the
+// tip (4), in the plane of the wrist/forearm joint (2).
+struct Frame {
+    Mat3 r;
+    Vec3 o;
+};
+Frame g_idle_rel;  // the idle weapon frame relative to the game camera
+bool g_have_idle;
+int g_idle_arm;
+
+Vec3 Cross(Vec3 a, Vec3 b)
+{
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+bool WeaponFrame(Frame& f)
+{
+    float j[5][3];
+    if (!EngineArmJoints(j))
+        return false;
+    Vec3 hand{j[3][0], j[3][1], j[3][2]}, tip{j[4][0], j[4][1], j[4][2]}, wrist{j[2][0], j[2][1], j[2][2]};
+    Vec3 x = tip - hand, z = Cross(x, wrist - hand);
+    float lx = Length(x), lz = Length(z);
+    if (lx < 1e-3f || lz < 1e-4f)
+        return false;
+    x = x * (1.0f / lx);
+    z = z * (1.0f / lz);
+    Vec3 y = Cross(z, x);
+    for (int r = 0; r < 3; ++r) {
+        f.r.m[r][0] = (&x.x)[r];
+        f.r.m[r][1] = (&y.x)[r];
+        f.r.m[r][2] = (&z.x)[r];
+    }
+    f.o = hand;
+    return true;
+}
+
+// The correction for the current arm pose, given the game camera (position,
+// rotation). The reference is the weapon's rest pose relative to the camera:
+// taken (when record is set) once the weapon has held still for a moment
+// outside an attack, and dropped when the arm or limb mode changes. Every
+// frame the weapon is moved back onto it, so no arm animation shows (swing,
+// wind-up, recovery, idle sway).
+Frame g_settle_rel;       // candidate rest pose
+double g_settle_since = -1;
+int g_ref_limb = -1;
+
+void PinCorrection(Vec3 cam, const Mat3& rg, bool record, Mat3& rc, Vec3& tc)
+{
+    rc = Mat3{};
+    tc = {};
+    Frame cur;
+    int arm = EngineArmObject();
+    int limb = EngineLimbMode();
+    if (!Config().weapon_in_hand || limb != 2 || !WeaponFrame(cur)) {
+        if (record)
+            g_have_idle = false;
+        return;
+    }
+    if (record) {
+        if (arm != g_idle_arm || limb != g_ref_limb) {
+            g_have_idle = false;
+            g_settle_since = -1;
+            g_idle_arm = arm;
+            g_ref_limb = limb;
+        }
+        Frame rel{Transpose(rg) * cur.r, Transpose(rg) * (cur.o - cam)};
+        double now = VrNowMs();
+        bool still = g_settle_since >= 0 && Length(rel.o - g_settle_rel.o) < 0.02f &&
+                     Dot({rel.r.m[0][0], rel.r.m[1][0], rel.r.m[2][0]},
+                         {g_settle_rel.r.m[0][0], g_settle_rel.r.m[1][0], g_settle_rel.r.m[2][0]}) > 0.9995f;
+        if (!still || EngineMeleeBusy()) {
+            g_settle_rel = rel;
+            g_settle_since = EngineMeleeBusy() ? -1 : now;
+        } else if (!g_have_idle && now - g_settle_since > 300) {
+            g_idle_rel = rel;
+            g_have_idle = true;
+            Log("Arm: rest pose recorded (arm %d)", arm);
+        }
+    }
+    if (!g_have_idle)
+        return;
+    Mat3 idle_r = rg * g_idle_rel.r;
+    Vec3 idle_o = cam + rg * g_idle_rel.o;
+    rc = idle_r * Transpose(cur.r);
+    tc = idle_o - rc * cur.o;
+}
+
+Mat3 g_pin_rc;  // this frame's correction for the render
+Vec3 g_pin_tc;
+
+// Melee hits: the weapon's hit spheres get the same move into the hand, kept
+// relative to the game camera (the game simulates between our frames):
+//   x' = c + h + D (x - c),  c = the game camera now, h = p_H - p_G.
+Mat3 g_weapon_d;
+Vec3 g_weapon_offset;
+ULONGLONG g_weapon_valid_until;  // GetTickCount64 deadline (stale when VR stops rendering)
+
+void WeaponPointToHand(float* p)
+{
+    int* cam = *Engine().current_camera;
+    if (!cam || GetTickCount64() > g_weapon_valid_until)
+        return;
+    const float* c = reinterpret_cast<const float*>(cam + 2);
+    const uint16_t* a = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
+    Vec3 cv{c[0], c[1], c[2]};
+    Mat3 rg = RotZ(Angle16ToRad(a[2])) * RotY(Angle16ToRad(a[1])) * RotX(Angle16ToRad(a[0]));
+    Mat3 rc;
+    Vec3 tc;
+    PinCorrection(cv, rg, false, rc, tc);
+    Vec3 pinned = rc * Vec3{p[0], p[1], p[2]} + tc;
+    Vec3 r = cv + g_weapon_offset + g_weapon_d * (pinned - cv);
+    p[0] = r.x;
+    p[1] = r.y;
+    p[2] = r.z;
+}
 
 // Diagnostics (logged every ~2 s): arm draws seen / adjusted.
 int g_arm_draws, g_arm_adjusted;
@@ -119,8 +242,10 @@ void __cdecl ArmRenderDetour()
             me.m[r][c] = block[r * 3 + c];
     Vec3 oe{block[9], block[10], block[11]};
     Mat3 d = g_arm_rh * Transpose(g_arm_rg);
-    Mat3 m = me * Transpose(d);
-    Vec3 o = g_arm_ph + d * (oe - g_arm_pg);
+    Mat3 a = d * g_pin_rc;
+    Vec3 b = g_arm_ph + d * (g_pin_tc - g_arm_pg);
+    Mat3 m = me * Transpose(a);
+    Vec3 o = a * oe + b;
 
     static int logged;
     if (logged++ < 2)
@@ -361,13 +486,21 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         Vec3 grip_in_view{Config().grip_forward_ft, -Config().grip_right_ft, -Config().grip_down_ft};
         g_arm_ph = g_arm_pg + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
         g_arm_override = true;
+        PinCorrection(g_arm_pg, g_arm_rg, true, g_pin_rc, g_pin_tc);
+        g_weapon_d = g_arm_rh * Transpose(g_arm_rg);
+        g_weapon_offset = g_arm_ph - g_arm_pg;
+        g_weapon_valid_until = GetTickCount64() + 250;
+    } else {
+        g_weapon_valid_until = 0;
     }
 
     g_arm_dump_active = g_arm_dump_requested;
     g_arm_dump_requested = false;
     g_arm_dump_captured = false;
-    if (g_arm_dump_active)
+    if (g_arm_dump_active) {
         Log("ArmDump: ---- frame dump (arm drawn unmodified) ----");
+        EngineLogArmWeapon();
+    }
 
     XrPosef poses[2];
     for (int eye = 0; eye < 2; ++eye) {
@@ -439,6 +572,8 @@ bool InstallStereoHook()
         if (as != MH_OK)
             g_arm_trampoline = nullptr;
         Log("Stereo: arm render hook %s", MH_StatusToString(as));
+        if (g_arm_trampoline)
+            EngineSetWeaponPointTransform(&WeaponPointToHand);
     }
     return st == MH_OK;
 }
