@@ -4,6 +4,7 @@
 #include "../log.h"
 #include "../render/stereo.h"
 #include "../vr.h"
+#include "../version.h"
 #include "../vrmath.h"
 #include "../xr/xr_pose.h"
 
@@ -122,6 +123,35 @@ void SettingWidget(const SettingInfo& s)
     ImGui::PopID();
 }
 
+// The refresh-rate choice (Performance tab): the rates the headset offers, or a
+// hint when the runtime doesn't let apps choose.
+void RefreshRateWidget()
+{
+    const std::vector<float>& rates = Xr().refresh_rates();
+    if (rates.empty()) {
+        ImGui::TextWrapped("Refresh rate: set it in your streaming app (e.g. Virtual Desktop's frame rate).");
+        return;
+    }
+    float& chosen = Config().refresh_rate;
+    char current[32];
+    if (chosen > 0)
+        snprintf(current, sizeof(current), "%.0f Hz", chosen);
+    else
+        snprintf(current, sizeof(current), "Headset default");
+    ImGui::SetNextItemWidth(520);
+    if (ImGui::BeginCombo("Refresh rate", current)) {
+        if (ImGui::Selectable("Headset default", chosen <= 0))
+            chosen = 0;
+        for (float r : rates) {
+            char label[32];
+            snprintf(label, sizeof(label), "%.0f Hz", r);
+            if (ImGui::Selectable(label, chosen == r))
+                chosen = r;
+        }
+        ImGui::EndCombo();
+    }
+}
+
 // The controls reference (the Controls tab).
 void ControlsTab()
 {
@@ -187,7 +217,7 @@ void BuildUi()
     ImGui::Begin("Thief2VR", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse);
-    ImGui::Text("Thief2VR settings");
+    ImGui::Text("Thief2VR " THIEF2VR_VERSION " settings");
     ImGui::SameLine(ImGui::GetWindowWidth() - 190);
     if (ImGui::Button("Close", ImVec2(160, 0)))
         g_close_requested = true;
@@ -201,9 +231,14 @@ void BuildUi()
             ImGui::BeginChild("items", ImVec2(0, controls ? 0.0f : -80.0f));
             if (controls)
                 ControlsTab();
-            for (int i = 0; i < count; ++i)
-                if (strcmp(settings[i].tab, tab) == 0)
+            for (int i = 0; i < count; ++i) {
+                if (strcmp(settings[i].tab, tab) != 0)
+                    continue;
+                if (strcmp(settings[i].name, "refresh_rate") == 0)
+                    RefreshRateWidget();
+                else
                     SettingWidget(settings[i]);
+            }
             if (strcmp(tab, "Performance") == 0) {
                 ImGui::Separator();
                 ImGui::TextWrapped("%s", VrTimingSummary());

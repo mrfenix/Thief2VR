@@ -11,6 +11,7 @@
 #include "log.h"
 #include "render/d3d9_hooks.h"
 #include "render/stereo.h"
+#include "version.h"
 #include "vr.h"
 
 namespace {
@@ -23,7 +24,7 @@ void Initialize()
         return;
     g_initialized = true;
     LogInit();
-    Log("Thief2VR starting (built " __DATE__ " " __TIME__ ")");
+    Log("Thief2VR " THIEF2VR_VERSION " starting (built " __DATE__ " " __TIME__ ")");
     Log("Game exe SHA-256: %s", ExeSha256().c_str());
     MH_STATUS st = MH_Initialize();
     Log("MinHook init: %s", MH_StatusToString(st));

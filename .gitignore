@@ -3,3 +3,4 @@ re/
 .vs/
 *.user
 *.log
+dist/

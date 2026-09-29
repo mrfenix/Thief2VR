@@ -73,6 +73,7 @@
     <ClInclude Include="engine\engine.h" />
     <ClInclude Include="render\stereo.h" />
     <ClInclude Include="vrmath.h" />
+    <ClInclude Include="version.h" />
     <ClInclude Include="render\d3d9_hooks.h" />
     <ClInclude Include="render\device_hooks.h" />
     <ClInclude Include="render\frame_transfer.h" />

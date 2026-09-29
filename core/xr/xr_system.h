@@ -59,6 +59,12 @@ public:
     bool color_format_is_rgba() const { return color_format_rgba_; }
     const XrViewConfigurationView& view_config(int eye) const { return view_configs_[eye]; }
 
+    // Display refresh rates (XR_FB_display_refresh_rate). Empty when the runtime
+    // doesn't offer the extension (then the rate is set in the streaming app).
+    const std::vector<float>& refresh_rates() const { return refresh_rates_; }
+    float current_refresh_rate() const;
+    bool RequestRefreshRate(float hz);  // 0 = the runtime's default
+
 private:
     bool CreateD3D11Device();
     void PollEvents();
@@ -76,6 +82,10 @@ private:
                                                 {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
+    bool has_refresh_rate_ = false;
+    std::vector<float> refresh_rates_;
+    PFN_xrGetDisplayRefreshRateFB get_refresh_rate_ = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB request_refresh_rate_ = nullptr;
 };
 
 XrSystem& Xr();

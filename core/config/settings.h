@@ -8,6 +8,8 @@
 #define SETTINGS_LIST(X)                                                                                        \
     X(bool, stereo, true, 0, 1, "View", "Stereo 3D (off = flat screen in VR)")                                  \
     X(bool, d3d9ex, true, 0, 1, "Performance", "Zero-copy GPU sharing via D3D9Ex (restart)")                  \
+    X(int, msaa, 0, 0, 4, "Performance", "Anti-aliasing: MSAA samples (0 = off, 2, 4)")                              \
+    X(float, refresh_rate, 0.0f, 0.0f, 144.0f, "Performance", "Refresh rate (Hz, 0 = headset default)")              \
     X(float, render_scale, 1.0f, 0.5f, 1.5f, "View", "Resolution scale (x headset recommended, restart)")       \
     X(float, render_fov_scale, 1.0f, 0.8f, 1.2f, "View", "Rendered FOV adjust")                                 \
     X(float, world_scale, 3.2808f, 2.0f, 5.0f, "View", "World units per metre (IPD / scale)")                   \
@@ -16,6 +18,7 @@
     X(float, position_clamp_ft, 1.0f, 0.0f, 3.0f, "View", "Max head offset from body (ft)")                     \
     X(bool, invert_roll, false, 0, 1, "View", "Invert head roll")                                               \
     X(bool, desktop_mirror, true, 0, 1, "View", "Show the game in the desktop window during missions")          \
+    X(float, mirror_fps, 30.0f, 5.0f, 90.0f, "View", "Desktop window frame rate during missions (fps)")              \
     X(bool, snap_turn, true, 0, 1, "Comfort", "Snap turn (off = smooth turn)")                                  \
     X(float, snap_turn_angle, 30.0f, 10.0f, 90.0f, "Comfort", "Snap turn angle (deg)")                          \
     X(float, smooth_turn_speed, 120.0f, 30.0f, 360.0f, "Comfort", "Smooth turn speed (deg/s)")                  \

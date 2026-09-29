@@ -18,6 +18,10 @@ bool InstallStereoHook();
 // Release D3D9 DEFAULT-pool resources (call before IDirect3DDevice9::Reset).
 void StereoOnDeviceReset();
 
+// Average GPU time of the two eye passes (ms) since the last call, or -1 if
+// none was measured yet.
+double StereoTakeGpuMs();
+
 // Re-capture the neutral head position and forward direction on the next frame.
 void StereoRequestRecenter();
 

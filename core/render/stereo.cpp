@@ -329,7 +329,81 @@ float g_neutral_yaw;  // engine-space heading of the head at recenter
 // On a D3D9Ex device they're shareable textures (handed to D3D11 on the GPU).
 EyeTargets g_eyes;
 IDirect3DTexture9* g_eye_texture[2];
-IDirect3DSurface9* g_eye_depth;
+IDirect3DSurface9* g_eye_depth;           // multisampled when MSAA is on
+IDirect3DSurface9* g_eye_msaa_color[2];   // MSAA: rendered into, then resolved into g_eyes.color
+int g_eye_msaa;                           // samples in use (0 = off)
+
+// GPU time of the eye passes: timestamp queries in a small ring, read back a
+// few frames later without flushing (so the pipeline never waits on them).
+constexpr int kGpuQuerySets = 4;
+struct GpuQuerySet {
+    IDirect3DQuery9* disjoint = nullptr;
+    IDirect3DQuery9* freq = nullptr;
+    IDirect3DQuery9* begin = nullptr;
+    IDirect3DQuery9* end = nullptr;
+    bool pending = false;
+};
+GpuQuerySet g_gpu_queries[kGpuQuerySets];
+int g_gpu_query_next;
+double g_gpu_ms_sum;
+int g_gpu_ms_count;
+
+void ReleaseQuery(IDirect3DQuery9*& q)
+{
+    if (q)
+        q->Release();
+    q = nullptr;
+}
+
+void ReleaseGpuQueries()
+{
+    for (GpuQuerySet& q : g_gpu_queries) {
+        ReleaseQuery(q.disjoint);
+        ReleaseQuery(q.freq);
+        ReleaseQuery(q.begin);
+        ReleaseQuery(q.end);
+        q.pending = false;
+    }
+}
+
+// Before the eye passes: collects the oldest set's result, then starts timing.
+GpuQuerySet* BeginGpuTiming(IDirect3DDevice9* dev)
+{
+    GpuQuerySet& q = g_gpu_queries[g_gpu_query_next];
+    g_gpu_query_next = (g_gpu_query_next + 1) % kGpuQuerySets;
+    if (!q.disjoint) {
+        if (FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT, &q.disjoint)) ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ, &q.freq)) ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMP, &q.begin)) ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMP, &q.end))) {
+            ReleaseGpuQueries();
+            return nullptr;
+        }
+    }
+    if (q.pending) {
+        BOOL disjoint = TRUE;
+        UINT64 freq = 0, t0 = 0, t1 = 0;
+        if (q.disjoint->GetData(&disjoint, sizeof(disjoint), 0) == S_OK &&
+            q.freq->GetData(&freq, sizeof(freq), 0) == S_OK && q.begin->GetData(&t0, sizeof(t0), 0) == S_OK &&
+            q.end->GetData(&t1, sizeof(t1), 0) == S_OK && !disjoint && freq && t1 > t0) {
+            g_gpu_ms_sum += (double)(t1 - t0) * 1000.0 / (double)freq;
+            ++g_gpu_ms_count;
+        }
+    }
+    q.disjoint->Issue(D3DISSUE_BEGIN);
+    q.begin->Issue(D3DISSUE_END);
+    q.pending = true;
+    return &q;
+}
+
+void EndGpuTiming(GpuQuerySet* q)
+{
+    if (!q)
+        return;
+    q->end->Issue(D3DISSUE_END);
+    q->freq->Issue(D3DISSUE_END);
+    q->disjoint->Issue(D3DISSUE_END);
+}
 HeadState g_head;
 Vec3 g_last_head;         // tracking-space head centre of the last frame
 Vec3 g_last_head_offset;  // head offset used for the eyes (feet, tracking-forward frame)
@@ -367,9 +441,37 @@ __declspec(naked) void Detour()
     }
 }
 
+// The MSAA sample count to use (0, 2 or 4), if the device supports it.
+int SupportedMsaa(IDirect3DDevice9* dev, int want)
+{
+    int samples = want >= 4 ? 4 : want >= 2 ? 2 : 0;
+    IDirect3D9* d3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp{};
+    if (!samples || FAILED(dev->GetDirect3D(&d3d)))
+        return 0;
+    if (FAILED(dev->GetCreationParameters(&cp))) {
+        d3d->Release();
+        return 0;
+    }
+    while (samples >= 2 &&
+           (FAILED(d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_A8R8G8B8, TRUE,
+                                                   (D3DMULTISAMPLE_TYPE)samples, nullptr)) ||
+            FAILED(d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, cp.DeviceType, D3DFMT_D24S8, TRUE,
+                                                   (D3DMULTISAMPLE_TYPE)samples, nullptr))))
+        samples /= 2;
+    d3d->Release();
+    return samples >= 2 ? samples : 0;
+}
+
 bool EnsureEyeTargets(IDirect3DDevice9* dev, UINT w, UINT h)
 {
-    if (g_eyes.color[0] && w == g_eyes.width && h == g_eyes.height)
+    static int checked_want = -1, supported = 0;
+    if (Config().msaa != checked_want) {
+        checked_want = Config().msaa;
+        supported = SupportedMsaa(dev, checked_want);
+    }
+    int msaa = supported;
+    if (g_eyes.color[0] && w == g_eyes.width && h == g_eyes.height && msaa == g_eye_msaa)
         return true;
     StereoOnDeviceReset();
     bool shareable = GameDeviceIsEx();
@@ -387,17 +489,32 @@ bool EnsureEyeTargets(IDirect3DDevice9* dev, UINT w, UINT h)
             return false;
         }
     }
-    HRESULT hr = dev->CreateDepthStencilSurface(w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &g_eye_depth,
-                                                nullptr);
+    auto ms_type = (D3DMULTISAMPLE_TYPE)msaa;  // 0 = D3DMULTISAMPLE_NONE
+    for (int eye = 0; msaa && eye < 2; ++eye) {
+        HRESULT hr = dev->CreateRenderTarget(w, h, D3DFMT_A8R8G8B8, ms_type, 0, FALSE, &g_eye_msaa_color[eye], nullptr);
+        if (FAILED(hr)) {
+            Log("Stereo: %dx MSAA eye target failed 0x%08x; anti-aliasing off", msaa, hr);
+            for (IDirect3DSurface9*& ms : g_eye_msaa_color) {
+                if (ms)
+                    ms->Release();
+                ms = nullptr;
+            }
+            msaa = 0;
+            ms_type = D3DMULTISAMPLE_NONE;
+        }
+    }
+    HRESULT hr = dev->CreateDepthStencilSurface(w, h, D3DFMT_D24S8, ms_type, 0, TRUE, &g_eye_depth, nullptr);
     if (FAILED(hr)) {
         Log("Stereo: eye depth %ux%u failed 0x%08x", w, h, hr);
         StereoOnDeviceReset();
         return false;
     }
+    g_eye_msaa = msaa;
     g_eyes.width = w;
     g_eyes.height = h;
     ++g_eyes.generation;
-    Log("Stereo: eye targets %ux%u (%s)", w, h, shareable ? "shared with D3D11" : "CPU copy");
+    Log("Stereo: eye targets %ux%u (%s), MSAA %s", w, h, shareable ? "shared with D3D11" : "CPU copy",
+        msaa ? (msaa == 4 ? "4x" : "2x") : "off");
     return true;
 }
 
@@ -616,6 +733,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     }
 
     XrPosef poses[2];
+    GpuQuerySet* gpu_timing = BeginGpuTiming(dev);
     for (int eye = 0; eye < 2; ++eye) {
         const XrView& view = frame->views[eye];
         poses[eye] = view.pose;
@@ -641,10 +759,14 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         *pos = p;
         g_dump_eye = p;
 
-        BeginSceneRedirect(dev, g_eyes.color[eye], g_eye_depth);
+        IDirect3DSurface9* target = g_eye_msaa ? g_eye_msaa_color[eye] : g_eyes.color[eye];
+        BeginSceneRedirect(dev, target, g_eye_depth);
         CallOriginal(pos, eye_focal);
         EndSceneRedirect(dev);
+        if (g_eye_msaa)
+            dev->StretchRect(target, nullptr, g_eyes.color[eye], nullptr, D3DTEXF_NONE);  // resolve
     }
+    EndGpuTiming(gpu_timing);
     *pos = body;
     g_arm_dump_active = false;
     g_arm_override = false;
@@ -695,6 +817,13 @@ void StereoOnDeviceReset()
     if (g_eye_depth)
         g_eye_depth->Release();
     g_eye_depth = nullptr;
+    for (IDirect3DSurface9*& ms : g_eye_msaa_color) {
+        if (ms)
+            ms->Release();
+        ms = nullptr;
+    }
+    g_eye_msaa = 0;
+    ReleaseGpuQueries();
     g_eyes.width = g_eyes.height = 0;
 }
 
@@ -745,4 +874,12 @@ bool TrackedAngles(const XrQuaternionf& orientation, float& heading, float& pitc
     float bank;
     ToHeadingPitchBank(RotZ(-g_neutral_yaw) * EngineOrientation(orientation), heading, pitch, bank);
     return true;
+}
+
+double StereoTakeGpuMs()
+{
+    double ms = g_gpu_ms_count ? g_gpu_ms_sum / g_gpu_ms_count : -1.0;
+    g_gpu_ms_sum = 0;
+    g_gpu_ms_count = 0;
+    return ms;
 }

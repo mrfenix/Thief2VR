@@ -104,20 +104,22 @@ bool XrSystem::Init()
     std::vector<XrExtensionProperties> exts(ext_count, {XR_TYPE_EXTENSION_PROPERTIES});
     xrEnumerateInstanceExtensionProperties(nullptr, ext_count, &ext_count, exts.data());
     bool has_d3d11 = false;
-    for (const auto& e : exts)
+    for (const auto& e : exts) {
         has_d3d11 |= strcmp(e.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0;
+        has_refresh_rate_ |= strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0;
+    }
     if (!has_d3d11) {
         Log("OpenXR: runtime has no %s", XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
         return false;
     }
 
-    const char* enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+    const char* enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME};
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     strcpy_s(ici.applicationInfo.applicationName, "Thief2VR");
     ici.applicationInfo.applicationVersion = 1;
     strcpy_s(ici.applicationInfo.engineName, "NewDark");
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-    ici.enabledExtensionCount = 1;
+    ici.enabledExtensionCount = has_refresh_rate_ ? 2 : 1;
     ici.enabledExtensionNames = enabled;
     if (!XrCheck(xrCreateInstance(&ici, &instance_), "xrCreateInstance"))
         return false;
@@ -160,6 +162,28 @@ bool XrSystem::Init()
     XrCheck(xrCreateReferenceSpace(session_, &rsci, &local_space_), "xrCreateReferenceSpace(LOCAL)");
     rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     XrCheck(xrCreateReferenceSpace(session_, &rsci, &view_space_), "xrCreateReferenceSpace(VIEW)");
+
+    // Refresh rates the headset offers (for the Performance tab).
+    if (has_refresh_rate_) {
+        PFN_xrEnumerateDisplayRefreshRatesFB enumerate = nullptr;
+        xrGetInstanceProcAddr(instance_, "xrEnumerateDisplayRefreshRatesFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&enumerate));
+        xrGetInstanceProcAddr(instance_, "xrGetDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&get_refresh_rate_));
+        xrGetInstanceProcAddr(instance_, "xrRequestDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&request_refresh_rate_));
+        uint32_t n = 0;
+        if (enumerate && XR_SUCCEEDED(enumerate(session_, 0, &n, nullptr)) && n) {
+            refresh_rates_.resize(n);
+            enumerate(session_, n, &n, refresh_rates_.data());
+        }
+        char list[128] = "";
+        for (float r : refresh_rates_)
+            snprintf(list + strlen(list), sizeof(list) - strlen(list), " %.0f", r);
+        Log("OpenXR: refresh rates%s (now %.0f Hz)", list, current_refresh_rate());
+    } else {
+        Log("OpenXR: no %s; the refresh rate is set in the streaming app", XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    }
 
     // The game renders gamma-encoded 8-bit BGRA. Use an sRGB swapchain so the
     // compositor decodes it correctly; copies go through the matching UNORM type.
@@ -292,4 +316,21 @@ void XrSystem::EndFrame(const XrFrame& frame, const XrCompositionLayerBaseHeader
     end.layerCount = frame.should_render ? count : 0;
     end.layers = layers;
     XrCheck(xrEndFrame(session_, &end), "xrEndFrame");
+}
+
+float XrSystem::current_refresh_rate() const
+{
+    float hz = 0;
+    if (get_refresh_rate_ && session_)
+        get_refresh_rate_(session_, &hz);
+    return hz;
+}
+
+bool XrSystem::RequestRefreshRate(float hz)
+{
+    if (!request_refresh_rate_ || !session_)
+        return false;
+    bool ok = XrCheck(request_refresh_rate_(session_, hz), "xrRequestDisplayRefreshRateFB");
+    Log("OpenXR: refresh rate %.0f Hz requested (%s)", hz, ok ? "ok" : "failed");
+    return ok;
 }

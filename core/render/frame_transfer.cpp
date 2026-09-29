@@ -38,7 +38,12 @@ bool FrameTransfer::EnsureResources(IDirect3DDevice9* device, const D3DSURFACE_D
             return false;
         }
     }
-    Log("FrameTransfer: %ux%u fmt %d msaa %d", width_, height_, format_, desc.MultiSampleType);
+    // At most once a second: dragging the HUD resolution slider resizes it every frame.
+    static ULONGLONG last_log;
+    if (GetTickCount64() - last_log > 1000) {
+        last_log = GetTickCount64();
+        Log("FrameTransfer: %ux%u fmt %d msaa %d", width_, height_, format_, desc.MultiSampleType);
+    }
     return true;
 }
 

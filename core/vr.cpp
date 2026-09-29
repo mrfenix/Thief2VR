@@ -398,10 +398,26 @@ bool VrOnPresent(IDirect3DDevice9* device)
 
     const Settings& s = Config();
     const bool in_scene = g_scene_this_frame;
-    const bool present_to_desktop = !in_scene || s.desktop_mirror;
+
+    // Refresh rate (Performance tab), when the runtime lets apps choose it.
+    static float applied_refresh = -1;
+    if (s.refresh_rate != applied_refresh && !Xr().refresh_rates().empty()) {
+        applied_refresh = s.refresh_rate;
+        Xr().RequestRefreshRate(s.refresh_rate);
+    }
 
     static double last_controls = VrNowMs();
     double now_ms = VrNowMs();
+
+    // The desktop window: in missions it's a mirror of the right eye, updated at
+    // mirror_fps (the game's Present costs several ms, so it doesn't run every
+    // frame); in menus it gets every frame (it's where the mouse works).
+    static double last_mirror_ms;
+    bool present_to_desktop = !in_scene;
+    if (in_scene && s.desktop_mirror && now_ms - last_mirror_ms >= 1000.0 / s.mirror_fps - 1.0) {
+        present_to_desktop = true;
+        last_mirror_ms = now_ms;
+    }
     double dt = (now_ms - last_controls) / 1000.0;
     last_controls = now_ms;
 
@@ -540,14 +556,16 @@ bool VrOnPresent(IDirect3DDevice9* device)
             double f = g_stats.frame / n;
             double measured = (g_stats.render + g_stats.eye_upload + g_stats.eye_capture + g_stats.hud +
                                g_stats.wait + g_stats.end + g_stats.desktop) / n;
-            Log("Timing (ms/frame avg): frame %.2f (%.1f fps) | xr wait %.2f | eye render %.2f | eye upload %.2f "
-                "| eye capture %.2f | hud %.2f | xr end %.2f | desktop present %.2f | game+other %.2f",
-                f, 1000.0 / f, g_stats.wait / n, g_stats.render / n, g_stats.eye_upload / n,
+            double gpu = StereoTakeGpuMs();
+            Log("Timing (ms/frame avg): frame %.2f (%.1f fps) | xr wait %.2f | eye render %.2f (GPU %.2f) "
+                "| eye upload %.2f | eye capture %.2f | hud %.2f | xr end %.2f | desktop present %.2f "
+                "| game+other %.2f",
+                f, 1000.0 / f, g_stats.wait / n, g_stats.render / n, gpu, g_stats.eye_upload / n,
                 g_stats.eye_capture / n, g_stats.hud / n, g_stats.end / n, g_stats.desktop / n, f - measured);
             snprintf(g_timing_text, sizeof(g_timing_text),
-                     "%.1f fps (%.2f ms/frame)\nEye render %.2f ms, GPU wait %.2f ms, HUD %.2f ms\n"
-                     "Waiting for the headset %.2f ms, desktop window %.2f ms",
-                     1000.0 / f, f, g_stats.render / n, g_stats.eye_capture / n, g_stats.hud / n, g_stats.wait / n,
+                     "%.1f fps (%.2f ms/frame)\nEye render: CPU %.2f ms, GPU %.2f ms; HUD %.2f ms\n"
+                     "Spare time (waiting for the headset) %.2f ms, desktop window %.2f ms",
+                     1000.0 / f, f, g_stats.render / n, gpu, g_stats.hud / n, g_stats.wait / n,
                      g_stats.desktop / n);
             g_stats = Stats{};
         }
