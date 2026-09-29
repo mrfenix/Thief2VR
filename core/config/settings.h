@@ -48,6 +48,7 @@
     X(float, physical_crouch_ft, 1.0f, 0.3f, 3.0f, "Movement", "Physical crouch depth (ft)")                    \
     X(bool, physical_lean, true, 0, 1, "Movement", "Lean by physically leaning")                                \
     X(float, physical_lean_ft, 0.58f, 0.1f, 1.5f, "Movement", "Physical lean distance (ft)")                     \
+    X(bool, lean_camera_shift, true, 0, 1, "Movement", "Lean adds the game's camera shift (off = view follows only your head)") \
     X(bool, hud_enabled, true, 0, 1, "HUD", "Show HUD (light gem, inventory)")                                  \
     X(bool, show_menu_hint, true, 0, 1, "HUD", "Show the VR menu hint when a mission starts")                        \
     X(float, hud_distance, 1.08f, 0.3f, 3.0f, "HUD", "HUD distance (m)")                                         \

@@ -328,6 +328,11 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         EngineCommand("automap");
 }
 
+bool ControlsLeaning()
+{
+    return g_lean_left.down || g_lean_right.down;
+}
+
 bool ControlsBowDrawing()
 {
     return g_bow_drawing;

@@ -22,3 +22,6 @@ void ControlsUpdate(const XrControllerState& controllers, bool in_mission, doubl
 
 // True while the two-handed bow's string is being drawn (right grip at the bow).
 bool ControlsBowDrawing();
+
+// True while the game's lean is held (physical lean).
+bool ControlsLeaning();

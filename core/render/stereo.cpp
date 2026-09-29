@@ -646,6 +646,36 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
 
     double render_start = VrNowMs();
     const EnginePosition body = *pos;
+
+    // The eyes start from the game camera. When "Lean adds the game's camera
+    // shift" is off, the game's lean slide is taken out: the camera's usual spot
+    // relative to the player (tracked while not leaning, in the player's facing
+    // frame) is used instead, so the view follows only the real head.
+    EnginePosition eye_base = body;
+    {
+        static Vec3 rest_offset;  // camera - player object, player facing frame (x, y only)
+        static bool have_rest;
+        static double lean_released_ms = -1e9;
+        int player = EnginePlayerObject();
+        const unsigned char* ppos = g_head.camera_mode == 0 && player ? EngineObjectPosition(player) : nullptr;
+        if (ppos) {
+            const float* pp = reinterpret_cast<const float*>(ppos);
+            Mat3 facing = RotZ(Angle16ToRad(body.heading));
+            Vec3 offset = Transpose(facing) * Vec3{body.x - pp[0], body.y - pp[1], 0.0f};
+            double now_ms = VrNowMs();
+            if (ControlsLeaning())
+                lean_released_ms = now_ms;
+            else if (now_ms - lean_released_ms > 700) {  // the lean-out animation is over
+                rest_offset = offset;
+                have_rest = true;
+            }
+            if (!Config().lean_camera_shift && have_rest) {
+                Vec3 base = facing * rest_offset;
+                eye_base.x = pp[0] + base.x;
+                eye_base.y = pp[1] + base.y;
+            }
+        }
+    }
     // The view comes from the world yaw (turns, mouse, scripts), not the body,
     // which points wherever the hand aims. Other cameras (scouting orb, security
     // cameras) use their own heading.
@@ -747,7 +777,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         Vec3 eye_from_head = unyaw * (basis * (ToVec(view.pose.position) - head)) * Config().world_scale;
         Vec3 offset = world_yaw * (head_offset + eye_from_head);
 
-        EnginePosition p = body;
+        EnginePosition p = eye_base;
         p.x += offset.x;
         p.y += offset.y;
         p.z += offset.z;
