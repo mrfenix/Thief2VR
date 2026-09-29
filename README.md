@@ -1,5 +1,9 @@
 # Thief2VR
 
+Click the image to play the video preview:
+[<img src="https://img.youtube.com/vi/gF1qXak96SI/hqdefault.jpg" width="720" height="480"
+/>](https://youtu.be/gF1qXak96SI)
+
 Play **Thief 2: The Metal Age** in VR, with full head and hand tracking.
 
 - **Stereo 3D at your headset's native resolution**, with 6DoF head tracking.
