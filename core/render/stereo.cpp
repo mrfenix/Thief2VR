@@ -2,6 +2,7 @@
 
 #include "../config/settings.h"
 #include "../engine/engine.h"
+#include "../input/vr_controls.h"
 #include "../log.h"
 #include "../vr.h"
 #include "../vrmath.h"
@@ -55,18 +56,10 @@ Frame g_idle_rel;  // the idle weapon frame relative to the game camera
 bool g_have_idle;
 int g_idle_arm;
 
-Vec3 Cross(Vec3 a, Vec3 b)
+// A frame from three points: origin o, x towards a, in the plane of b.
+bool FrameFrom(Vec3 o, Vec3 a, Vec3 b, Frame& f)
 {
-    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-}
-
-bool WeaponFrame(Frame& f)
-{
-    float j[5][3];
-    if (!EngineArmJoints(j))
-        return false;
-    Vec3 hand{j[3][0], j[3][1], j[3][2]}, tip{j[4][0], j[4][1], j[4][2]}, wrist{j[2][0], j[2][1], j[2][2]};
-    Vec3 x = tip - hand, z = Cross(x, wrist - hand);
+    Vec3 x = a - o, z = Cross(x, b - o);
     float lx = Length(x), lz = Length(z);
     if (lx < 1e-3f || lz < 1e-4f)
         return false;
@@ -78,8 +71,39 @@ bool WeaponFrame(Frame& f)
         f.r.m[r][1] = (&y.x)[r];
         f.r.m[r][2] = (&z.x)[r];
     }
-    f.o = hand;
+    f.o = o;
     return true;
+}
+
+// The bow as a rigid body (the hand on its grip, joints 3, 4, 6): origin at the
+// grip (between 4 and 6), x up the bow (6 -> 4), in the plane of the wrist (3).
+bool BowFrame(Vec3 j3, Vec3 j4, Vec3 j6, Frame& f)
+{
+    return FrameFrom((j4 + j6) * 0.5f, j4, j3, f);
+}
+
+// The weapon's frame from the arm's joints. Sword / blackjack: origin = hand
+// (3), x towards the tip (4), in the plane of the forearm joint (2).
+bool WeaponFrame(int limb, Frame& f)
+{
+    float j[8][3];
+    auto v = [&](int i) { return Vec3{j[i][0], j[i][1], j[i][2]}; };
+    if (limb == 1)
+        return EngineArmJoints(j, 8) && BowFrame(v(3), v(4), v(6), f);
+    return EngineArmJoints(j, 5) && FrameFrom(v(3), v(4), v(2), f);
+}
+
+// The bow at full draw, relative to the game camera (feet; forward, left, up),
+// measured with the F12 dump: upright ~2 ft ahead, its arrow along the camera's
+// forward axis. The bow is always held in this pose, so the arrow leaves along
+// the frame's camera-forward axis.
+const Frame& BowAimPose()
+{
+    static Frame f;
+    static bool made = BowFrame({1.638f, -0.452f, -0.629f}, {2.050f, -0.420f, -0.071f},
+                                {1.954f, -0.329f, -1.309f}, f);
+    (void)made;
+    return f;
 }
 
 // The correction for the current arm pose, given the game camera (position,
@@ -99,11 +123,19 @@ void PinCorrection(Vec3 cam, const Mat3& rg, bool record, Mat3& rc, Vec3& tc)
     Frame cur;
     int arm = EngineArmObject();
     int limb = EngineLimbMode();
-    if (!Config().weapon_in_hand || limb != 2 || !WeaponFrame(cur)) {
+    if (!Config().weapon_in_hand || (limb != 1 && limb != 2) || !WeaponFrame(limb, cur)) {
         if (record)
             g_have_idle = false;
         return;
     }
+    if (limb == 1) {
+        // The bow: always pinned to its measured full-draw pose.
+        const Frame& aim = BowAimPose();
+        rc = (rg * aim.r) * Transpose(cur.r);
+        tc = (cam + rg * aim.o) - rc * cur.o;
+        return;
+    }
+    bool busy = EngineMeleeBusy();
     if (record) {
         if (arm != g_idle_arm || limb != g_ref_limb) {
             g_have_idle = false;
@@ -116,9 +148,9 @@ void PinCorrection(Vec3 cam, const Mat3& rg, bool record, Mat3& rc, Vec3& tc)
         bool still = g_settle_since >= 0 && Length(rel.o - g_settle_rel.o) < 0.02f &&
                      Dot({rel.r.m[0][0], rel.r.m[1][0], rel.r.m[2][0]},
                          {g_settle_rel.r.m[0][0], g_settle_rel.r.m[1][0], g_settle_rel.r.m[2][0]}) > 0.9995f;
-        if (!still || EngineMeleeBusy()) {
+        if (!still || busy) {
             g_settle_rel = rel;
-            g_settle_since = EngineMeleeBusy() ? -1 : now;
+            g_settle_since = busy ? -1 : now;
         } else if (!g_have_idle && now - g_settle_since > 300) {
             g_idle_rel = rel;
             g_have_idle = true;
@@ -162,28 +194,10 @@ void WeaponPointToHand(float* p)
     p[2] = r.z;
 }
 
-// Diagnostics (logged every ~2 s): arm draws seen / adjusted.
-int g_arm_draws, g_arm_adjusted;
-
 // F12 arm-transform dump: for one frame the arm is drawn unmodified, and at its
 // first draw call in each eye the render context and related state are logged.
-bool g_arm_dump_requested, g_arm_dump_active, g_arm_dump_captured;
+bool g_arm_dump_requested, g_arm_dump_active;
 EnginePosition g_dump_eye;
-
-// Opens thief2vr_arm_tris.txt next to the exe (the arm's triangles, see SetGeometryCapture).
-FILE* OpenArmCaptureFile()
-{
-    char path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
-    while (n > 0 && path[n - 1] != '\\' && path[n - 1] != '/')
-        --n;
-    path[n] = 0;
-    strncat_s(path, "thief2vr_arm_tris.txt", _TRUNCATE);
-    FILE* f = nullptr;
-    fopen_s(&f, path, "w");
-    Log("ArmDump: writing arm triangles to %s (%s)", path, f ? "ok" : "failed");
-    return f;
-}
 
 void DumpArmContext()
 {
@@ -213,21 +227,12 @@ void DumpArmContext()
 void __cdecl ArmRenderDetour()
 {
     if (g_arm_dump_active) {
-        FILE* capture = g_arm_dump_captured ? nullptr : OpenArmCaptureFile();  // first eye only
-        g_arm_dump_captured = true;
         SetDrawProbe(&DumpArmContext);
-        SetGeometryCapture(capture);
         reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
-        SetGeometryCapture(nullptr);
         SetDrawProbe(nullptr);
-        if (capture)
-            fclose(capture);
         return;
     }
-    ++g_arm_draws;
     unsigned char* ctx = g_arm_override ? EngineRenderContext() : nullptr;
-    if (ctx)
-        ++g_arm_adjusted;
     if (!ctx) {
         reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
         return;
@@ -246,11 +251,6 @@ void __cdecl ArmRenderDetour()
     Vec3 b = g_arm_ph + d * (g_pin_tc - g_arm_pg);
     Mat3 m = me * Transpose(a);
     Vec3 o = a * oe + b;
-
-    static int logged;
-    if (logged++ < 2)
-        Log("Arm: render camera origin (%.2f %.2f %.2f) -> (%.2f %.2f %.2f), hand at (%.2f %.2f %.2f)", oe.x, oe.y,
-            oe.z, o.x, o.y, o.z, g_arm_ph.x, g_arm_ph.y, g_arm_ph.z);
 
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -464,26 +464,48 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
 
     // Weapon in hand: the frame the arm should be drawn in (H) and the game
     // camera it's placed relative to (G). The arm render hook uses them.
+    // The bow is held in the left hand when two-handed (the right one draws).
     XrPosef grip_pose, aim_pose;
     int* cam = *Engine().current_camera;
+    const bool bow = EngineLimbMode() == 1;
+    const bool bow_left = bow && Config().bow_two_handed;
     g_arm_override = false;
     if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam &&
-        XrControls().LocateHand(1, frame->display_time, grip_pose, aim_pose)) {
+        XrControls().LocateHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose)) {
         const float* cam_pos = reinterpret_cast<const float*>(cam + 2);
         const uint16_t* cam_ang = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
         g_arm_rg = RotZ(Angle16ToRad(cam_ang[2])) * RotY(Angle16ToRad(cam_ang[1])) * RotX(Angle16ToRad(cam_ang[0]));
         g_arm_pg = {cam_pos[0], cam_pos[1], cam_pos[2]};
         // The hand's orientation, plus the user alignment (Hands tab) in the
         // hand's frame, about the grip.
+        const Settings& cfg = Config();
         const float deg = kPi / 180.0f;
-        g_arm_rh = world_yaw * unyaw * EngineOrientation(aim_pose.orientation) *
-                   RotZ(Config().weapon_yaw_deg * deg) * RotY(Config().weapon_pitch_deg * deg) *
-                   RotX(Config().weapon_roll_deg * deg);
+        Mat3 adjust = bow ? RotZ(cfg.bow_yaw_deg * deg) * RotY(cfg.bow_pitch_deg * deg) *
+                                     RotX(cfg.bow_roll_deg * deg)
+                               : RotZ(cfg.weapon_yaw_deg * deg) * RotY(cfg.weapon_pitch_deg * deg) *
+                                     RotX(cfg.weapon_roll_deg * deg);
+        g_arm_rh = world_yaw * unyaw * EngineOrientation(aim_pose.orientation) * adjust;
+        // Drawing the two-handed bow: it pivots on the bow hand to lie along the
+        // arrow line (string hand -> bow hand), the line the arrow flies along.
+        XrPosef string_grip, string_aim;
+        if (bow_left && ControlsBowDrawing() &&
+            XrControls().LocateHand(1, frame->display_time, string_grip, string_aim)) {
+            Mat3 to_world = world_yaw * unyaw * XrToEngineBasis();
+            Vec3 forward = g_arm_rh * Vec3{1, 0, 0};
+            Vec3 line = BowArrowLine(forward, to_world * ToVec(grip_pose.position),
+                                     to_world * ToVec(string_grip.position));
+            g_arm_rh = RotationBetween(forward, line) * g_arm_rh;
+        }
         // Place H so the arm's usual grip point (in view: forward/right/down)
         // lands on the controller.
         float hand[3];
         TrackedPointToCameraOffset(grip_pose.position, yaw, hand);
-        Vec3 grip_in_view{Config().grip_forward_ft, -Config().grip_right_ft, -Config().grip_down_ft};
+        // The bow: its grip goes to the controller (adjusted by the Bow position
+        // sliders); its arrow then points along the controller. Swords: the
+        // Weapon grip sliders.
+        Vec3 grip_in_view{cfg.grip_forward_ft, -cfg.grip_right_ft, -cfg.grip_down_ft};
+        if (bow)
+            grip_in_view = BowAimPose().o + Vec3{cfg.bow_forward_ft, -cfg.bow_right_ft, -cfg.bow_down_ft};
         g_arm_ph = g_arm_pg + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
         g_arm_override = true;
         PinCorrection(g_arm_pg, g_arm_rg, true, g_pin_rc, g_pin_tc);
@@ -496,7 +518,6 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
 
     g_arm_dump_active = g_arm_dump_requested;
     g_arm_dump_requested = false;
-    g_arm_dump_captured = false;
     if (g_arm_dump_active) {
         Log("ArmDump: ---- frame dump (arm drawn unmodified) ----");
         EngineLogArmWeapon();
@@ -534,16 +555,6 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     }
     *pos = body;
     g_arm_dump_active = false;
-
-    static double last_arm_log;
-    double now = VrNowMs();
-    if (now - last_arm_log > 2000) {
-        last_arm_log = now;
-        Log("Arm: override %d, draws %d, adjusted %d, grip fwd %.2f right %.2f down %.2f, menu %d", g_arm_override,
-            g_arm_draws, g_arm_adjusted, Config().grip_forward_ft, Config().grip_right_ft, Config().grip_down_ft,
-            MenuIsOpen());
-        g_arm_draws = g_arm_adjusted = 0;
-    }
     g_arm_override = false;
 
     // The overlays the frame render draws next (light gem, inventory, text) then
@@ -619,6 +630,19 @@ bool TrackedPointToCameraOffset(const XrVector3f& point, float world_yaw, float 
     out[0] = world.x;
     out[1] = world.y;
     out[2] = world.z;
+    return true;
+}
+
+bool TrackedDirectionAngles(const XrVector3f& direction, float& heading, float& pitch)
+{
+    if (!g_head.valid)
+        return false;
+    Vec3 v = RotZ(-g_neutral_yaw) * (XrToEngineBasis() * ToVec(direction));
+    float len = Length(v);
+    if (len < 1e-4f)
+        return false;
+    heading = std::atan2(v.y, v.x);
+    pitch = std::asin(-v.z / len);  // positive = down
     return true;
 }
 

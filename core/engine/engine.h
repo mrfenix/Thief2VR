@@ -94,9 +94,11 @@ void EngineLogArmWeapon();
 void EngineSetVrMelee(bool enabled);
 bool EngineMeleeStrike(bool open);
 
-// The first-person arm's 5 joints (world space; 0 = root, 3 = hand, 4 = the
-// weapon's tip), or false.
-bool EngineArmJoints(float out[5][3]);
+// The first-person arm's first `count` joints (world space), or false.
+// Sword / blackjack arm (5): 0 root, 1-2 arm, 3 hand, 4 weapon tip.
+// Bow arm (8): 0 root, 1 shoulder, 2 elbow, 3 wrist; 3, 4, 6 rigid (the hand on
+// the bow's grip); 4 -> 5 upper limb, 6 -> 7 lower limb (the limbs flex).
+bool EngineArmJoints(float out[][3], int count);
 
 // True while a sword / blackjack attack is under way (wind-up to recovery).
 bool EngineMeleeBusy();

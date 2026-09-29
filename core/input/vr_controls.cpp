@@ -41,12 +41,18 @@ Edge g_snap, g_crouch_toggle, g_run_toggle, g_map, g_a, g_b, g_x;
 bool g_run_on;
 bool g_moving;
 double g_strike_time = -1;  // seconds the melee hit window has been open, -1 closed
+bool g_bow_drawing;         // two-handed bow: the right hand is drawing the string
+
+Vec3 GripPos(const XrControllerState& c, int hand)
+{
+    const XrVector3f& p = c.grip_pose[hand].position;
+    return {p.x, p.y, p.z};
+}
 
 void CloseStrike()
 {
     if (g_strike_time >= 0) {
         EngineMeleeStrike(false);
-        Log("Melee: hit window closed after %.2f s", g_strike_time);
         g_strike_time = -1;
     }
 }
@@ -66,6 +72,7 @@ void ReleaseAll()
         g_moving = false;
     }
     CloseStrike();
+    g_bow_drawing = false;
 }
 
 XrVector2f Deadzone(XrVector2f v, float dz)
@@ -122,9 +129,28 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     // --- Aim: the body's heading and pitch follow the right hand (or the head).
     //     The engine aims frob, arrows, swings and throws from the body, and
     //     places the first-person weapon relative to it. The view is unaffected.
+    //     The bow: along the bow's arrow (the hand's pointing plus the Bow angle
+    //     sliders, as it's drawn); while drawing the two-handed bow, blended into
+    //     the line from the string hand through the bow hand.
     if (head.camera_mode == 0) {
         float aim_yaw = 0, aim_pitch = 0;
-        if (s.aim_with_hand && c.pose_valid[1] && TrackedAngles(c.aim_pose[1].orientation, aim_yaw, aim_pitch)) {
+        const bool bow_out = EngineLimbMode() == 1;
+        const int bow_hand = s.bow_two_handed ? 0 : 1;
+        bool bow_aim = bow_out && c.pose_valid[bow_hand] && (!s.bow_two_handed || g_bow_drawing);
+        if (bow_aim) {
+            const float deg = kPi / 180.0f;
+            Mat3 adjust = RotZ(s.bow_yaw_deg * deg) * RotY(s.bow_pitch_deg * deg) * RotX(s.bow_roll_deg * deg);
+            const XrQuaternionf& q = c.aim_pose[bow_hand].orientation;
+            Vec3 arrow = Rotate({q.x, q.y, q.z, q.w}, Transpose(XrToEngineBasis()) * (adjust * Vec3{1, 0, 0}));
+            if (g_bow_drawing)
+                arrow = BowArrowLine(arrow, GripPos(c, 0), GripPos(c, 1));
+            bow_aim = TrackedDirectionAngles({arrow.x, arrow.y, arrow.z}, aim_yaw, aim_pitch);
+        }
+        if (bow_aim) {
+            EngineSetAimYaw(aim_yaw);
+            EngineSetLookPitch(aim_pitch);
+        } else if (s.aim_with_hand && c.pose_valid[1] &&
+                   TrackedAngles(c.aim_pose[1].orientation, aim_yaw, aim_pitch)) {
             EngineSetAimYaw(aim_yaw);
             EngineSetLookPitch(aim_pitch);
         } else if (s.aim_follows_head) {
@@ -187,13 +213,38 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
             swing_hold = 0.001;  // press for one frame, then release = quick swing
             swing_cooldown = 0.4;
             XrControls().Vibrate(1, 0.5f, 0.06f);
-            Log("Controls: swing attack (tip %.1f m/s)", speed);
         }
     } else {
         have_last_tip = false;
     }
 
-    bool weapon = Analog(rt, c.trigger[1]) || swing_hold > 0;
+    // --- Two-handed bow (limb mode 1): the bow is held in the left hand.
+    //     Squeezing the right grip at the bow nocks an arrow and draws; letting
+    //     go fires. A grip press away from the bow still frobs / uses items.
+    const bool bow = s.bow_two_handed && EngineLimbMode() == 1 && c.pose_valid[0] && c.pose_valid[1];
+    const bool grip = Analog(rg, c.grip[1]);
+    static bool grip_was, grip_draws;
+    const float hands_m = bow ? Length(GripPos(c, 0) - GripPos(c, 1)) : 0.0f;
+    if (grip && !grip_was) {
+        grip_draws = bow && hands_m < 0.25f;
+        if (grip_draws)
+            XrControls().Vibrate(1, 0.4f, 0.03f);  // nock
+    }
+    if (!grip || !bow)
+        grip_draws = false;
+    grip_was = grip;
+    const bool was_drawing = g_bow_drawing;
+    g_bow_drawing = grip_draws;
+    if (g_bow_drawing) {
+        // String tension on the drawing hand, growing with the draw length.
+        float tension = std::fmin(1.0f, std::fmax(0.0f, (hands_m - 0.1f) / 0.5f));
+        XrControls().Vibrate(1, 0.05f + 0.3f * tension, 0.02f);
+    } else if (was_drawing) {
+        XrControls().Vibrate(0, 0.8f, 0.05f);  // release
+        XrControls().Vibrate(1, 0.6f, 0.04f);
+    }
+
+    bool weapon = Analog(rt, c.trigger[1]) || swing_hold > 0 || g_bow_drawing;
     if (weapon && !g_use_weapon.down)
         XrControls().Vibrate(1, 0.2f, 0.03f);
     bool was_down = g_use_weapon.down;
@@ -211,12 +262,10 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     }
     if (s.swing_to_attack && melee && was_down && !g_use_weapon.down) {
         CloseStrike();
-        if (EngineMeleeStrike(true)) {
+        if (EngineMeleeStrike(true))
             g_strike_time = 0;
-            Log("Melee: hit window open (tip %.1f m/s)", tip_speed);
-        }
     }
-    g_use_item.Set(Analog(rg, c.grip[1]));
+    g_use_item.Set(grip && !grip_draws);
     g_block.Set(Analog(lt, c.trigger[0]));
 
     // --- Crouch: left grip, or physically crouching ---
@@ -267,4 +316,9 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     }
     if (g_map.Pressed(c.stick_click[1]))
         EngineCommand("automap");
+}
+
+bool ControlsBowDrawing()
+{
+    return g_bow_drawing;
 }

@@ -94,6 +94,45 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
   - 2 = sword / blackjack (`FUN_0046c230`, sets the attack timings)
   - 4 = carrying a body (`FUN_0046a090`)
 
+### Melee (sword / blackjack)
+- **Attack state machine** (limb mode 2, set up by `FUN_0046c230`; timings in ms at `DAT_00890fa4..fb4`: full charge 1200, max hold 8000, 200, 1200, quick-swing limit 650):
+  - `FUN_0046c950` (use_weapon press) needs `DAT_00890f7c` and `DAT_00890f8c` (ready). It sends StartWindup (`FUN_0059c2f0(1,…)`), requests the wind-up motion (`FUN_0054ca30`), sets `DAT_00890f9c` = winding and resets the timer `DAT_00890fa0`. It registers the arm motion-flag callbacks `0x1000 -> 0x0046c460` and `0x2000 -> 0x0046c490`.
+  - `FUN_0046ca90` (release) sends StartAttack (`FUN_0059c2f0(2, weapon, level 1..3)`), requests the swing motion (`FUN_0054c830`) and sets `DAT_00890f94` = released.
+  - `0x0046c460` → `FUN_0055aab0`: hits on. `0x0046c490` → `FUN_0055ab00`: hits off. Both take EAX = creature object and ESI = weapon, and call `creature->vtbl[0x9c](weapon, 0)` (MakeWeaponPhysical) or `vtbl[0xa0](weapon)` (MakeWeaponNonPhysical). The creature comes from `DAT_0099b8b0`: `+0xe4` maps obj→index (virtual), `+0xd4` is a table of entries whose creature is at `+4`.
+  - `FUN_0046bca0` ends the attack (motion finished): hits off, CurWpnDmg, then EndAttack and resetting `f94`/`f98`.
+  - In a quick swing the hits switch on about 0.54 s after the press, when the swing animation reaches flag 0x1000.
+  - Arm motion requests: `DAT_00aa1410[4]` = 1 wind-up (`[5]` = type), 2 swing, 3 idle, applied by `FUN_0054c780`.
+- **Hit spheres:** `FUN_0055fcd0` (a creature method, `__thiscall(creature, weapon, weapon index)`, RET 8) runs each frame while the weapon has physics.
+  - The spheres come from the creature type's weapon table: `DAT_00aa1554[creature+0x38] + 0x3c`, then `[index]` = {count, entries of 5 dwords: joint A, joint B, t, radius, ?}.
+  - Each sphere is placed at `lerp(joint A, joint B, t)` of the joints (world space, `creature+0x19c`) by `FUN_00537270` (cdecl(obj, sphere), point in EDI).
+  - For the player it also raycasts from the player to each sphere, and on a hit calls `IDamageModel::HandleImpact`.
+- **Current weapon:** `FUN_0059db80` returns CurWeapon(owner in EDX) in EAX. It doesn't preserve the callee-saved registers.
+- **Damage model:** `AppGetObj` (`FUN_00677250`, stdcall, RET 4) with the IID at `0x007e72d0`. Slots:
+  - 3 HandleImpact(victim, culprit, impact*, event*);
+  - 4 DamageObject(victim, culprit, {amount, type}*, …);
+  - 5 SlayObject.
+- **Damage seen:** a blackjack hit gives DamageObject {1, -900} (knockout); a sword hit gives {2, -901}.
+- **Player arm joints:** 5 joints — 0 root (the arm object's position), 1–2 arm, 3 hand, 4 weapon tip (the sword is about 3 ft from joint 3 to 4).
+- **Thief2VR:**
+  - The spheres get the same move into the hand as the drawn arm.
+  - With VR melee on, the 0x1000/0x2000 callbacks are ignored. The swing opens the hit window right after its quick attack is released (`f94` set) and closes it when the hand slows.
+  - The weapon is pinned to a recorded rest pose (joint frame 2-3-4 relative to the game camera), so the arm animation doesn't show.
+
+### Bow arm
+- **Joints:** 8 in total.
+  - 0 root, 1 shoulder, 2 elbow, 3 wrist.
+  - 3, 4 and 6 are rigid: the hand on the grip.
+  - 4 → 5 is the upper limb (1.81 ft) and 6 → 7 the lower limb (1.23 ft). The limbs flex while drawing: the tip-to-grip distances change.
+- **Full draw, relative to the game camera** (ft; forward, left, up):
+  - 3 (1.638, -0.452, -0.629)
+  - 4 (2.050, -0.420, -0.071)
+  - 6 (1.954, -0.329, -1.309)
+  - 5 (1.111, -0.671, 1.456)
+  - 7 (1.225, -0.327, -2.295)
+- The bow is upright about 2 ft ahead, and the arrow runs parallel to the camera's forward axis (its vanishing point is the screen centre).
+- At rest the bow is lowered and tilted.
+- Thief2VR always pins the bow to this full-draw pose and puts its grip (between 4 and 6) in the hand. Camera-forward then maps to the arrow direction.
+
 ### Menus / 2D screens (mouse)
 - The exe imports `GetCursorPos`, `SetCursorPos`, `ClipCursor`, `ScreenToClient` and `ClientToScreen`. It also loads `dinput.dll` (`DirectInputCreateA`) and raw input (`RegisterRawInputDevices` / `GetRawInputData`, cfg `raw_mouse_input`).
 - Thief2VR drives the menus with `SetCursorPos` plus `SendInput` (real OS input, so every path above sees it). See `core/input/screen_pointer.cpp`.

@@ -483,7 +483,6 @@ void* g_weapon_update_trampoline;
 void* g_sphere_set_trampoline;
 int g_player_weapon_in_update;  // weapon obj while the player's arm is placing its spheres, else 0
 WeaponPointTransform g_weapon_transform;
-unsigned char* g_arm_creature_seen;  // `this` of the last arm weapon update (diagnostics)
 
 // Snapshot of the arm's last weapon update (for the F12 dump / logging).
 constexpr int kMaxJoints = 24, kMaxSpheres = 8;
@@ -541,16 +540,11 @@ bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int w
         return original(creature, nullptr, weapon, index);
 
     SnapshotArmWeapon(creature, weapon, index);
-    g_arm_creature_seen = creature;
     g_player_weapon_in_update = g_weapon_transform ? weapon : 0;
     bool result = original(creature, nullptr, weapon, index);
     g_player_weapon_in_update = 0;
 
-    bool physical = g_get_phys_model && g_get_phys_model(weapon) != nullptr;
-    if (physical != g_arm_weapon.physical)
-        Log("Weapon: %d %s (%d hit spheres)", weapon, physical ? "swinging, hits enabled" : "hits disabled",
-            g_arm_weapon.spheres);
-    g_arm_weapon.physical = physical;
+    g_arm_weapon.physical = g_get_phys_model && g_get_phys_model(weapon) != nullptr;
     return result;
 }
 
@@ -648,86 +642,6 @@ __declspec(naked) int __cdecl CallCreatureWeapon(void* /*fn*/, int /*creature_ob
     }
 }
 
-// --- Hit logging (diagnostics) ---
-// The damage model (IDamageModel, from AppGetObj FUN_00677250 with the IID at
-// 0x007e72d0): slot 3 HandleImpact, 4 DamageObject, 5 SlayObject, all
-// (this, victim, culprit, data, ...). Logged when the player's weapon, arm or
-// the player is involved, or within 1 s of a VR hit window.
-void* g_dmg_tramp[3];
-ULONGLONG g_last_strike_ms;
-
-void __cdecl LogDamageCall(int slot, int victim, int culprit, const int* data)
-{
-    int player = g_player_object ? *g_player_object : 0;
-    int arm = EngineArmObject();
-    bool related = culprit == player || culprit == arm || culprit == g_strike_weapon ||
-                   GetTickCount64() - g_last_strike_ms < 1000;
-    if (!related)
-        return;
-    static const char* names[] = {"HandleImpact", "DamageObject", "SlayObject"};
-    int d0 = 0, d1 = 0;
-    __try {
-        if (data) {
-            d0 = data[0];
-            d1 = data[1];
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    Log("Hit: %s victim %d culprit %d (player %d, arm %d, weapon %d) data %d %d / %.2f", names[slot - 3], victim,
-        culprit, player, arm, g_strike_weapon, d0, d1, *reinterpret_cast<float*>(&d0));
-}
-
-#define DAMAGE_THUNK(n)                                                                                       __declspec(naked) void DamageThunk##n()                                                                   {                                                                                                             __asm pushad                                                                                              __asm push dword ptr [esp + 48]                                                                           __asm push dword ptr [esp + 48]                                                                           __asm push dword ptr [esp + 48]                                                                           __asm push n                                                                                              __asm call LogDamageCall                                                                                  __asm add esp, 16                                                                                         __asm popad                                                                                               __asm jmp dword ptr [g_dmg_tramp + (n - 3) * 4]                                                       }
-DAMAGE_THUNK(3)
-DAMAGE_THUNK(4)
-DAMAGE_THUNK(5)
-
-// Calls an engine function fn(arg), saving every register and restoring the
-// stack pointer afterwards, so it works whether fn pops its argument (stdcall,
-// like AppGetObj: RET 4) or not, and whether or not it preserves registers.
-__declspec(naked) void* __cdecl CallEngine1(void* /*fn*/, const void* /*arg*/)
-{
-    __asm {
-        push ebx
-        push esi
-        push edi
-        push ebp
-        mov ebp, esp
-        push dword ptr [ebp + 24]
-        call dword ptr [ebp + 20]
-        mov esp, ebp
-        pop ebp
-        pop edi
-        pop esi
-        pop ebx
-        ret
-    }
-}
-
-void InstallDamageLogging()
-{
-    static bool tried;
-    if (tried)
-        return;
-    tried = true;
-    // AppGetObj (FUN_00677250) with the damage model's IID.
-    void** model = static_cast<void**>(CallEngine1(g_base + 0x277250, g_base + 0x3e72d0));
-    if (!model) {
-        Log("Hit logging: no damage model");
-        return;
-    }
-    void** vtable = reinterpret_cast<void**>(*model);
-    void* thunks[3] = {&DamageThunk3, &DamageThunk4, &DamageThunk5};
-    for (int i = 0; i < 3; ++i) {
-        MH_STATUS st = MH_CreateHook(vtable[3 + i], thunks[i], &g_dmg_tramp[i]);
-        if (st == MH_OK)
-            st = MH_EnableHook(vtable[3 + i]);
-        Log("Hit logging: damage model slot %d at %p: %s", 3 + i, vtable[3 + i], MH_StatusToString(st));
-    }
-    // AppGetObj added a reference; the damage model lives as long as the game.
-    reinterpret_cast<unsigned long(__stdcall*)(void*)>(vtable[2])(model);
-}
-
 } // namespace
 
 void EngineSetVrMelee(bool enabled)
@@ -740,7 +654,6 @@ bool EngineMeleeStrike(bool open)
     if (!g_vr_melee || !g_player_object)
         return false;
     if (!open) {
-        g_last_strike_ms = GetTickCount64();
         if (g_strike_weapon)
             CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
         g_strike_arm = g_strike_weapon = 0;
@@ -750,12 +663,8 @@ bool EngineMeleeStrike(bool open)
     int released = *reinterpret_cast<int*>(g_base + 0x490f94);  // DAT_00890f94
     int arm = EngineArmObject();
     int weapon = CallCurWeapon(*g_player_object);
-    if (!released || !arm || weapon <= 0) {
-        Log("Melee: strike not started (released %d, arm %d, weapon %d)", released, arm, weapon);
-        return false;
-    }
-    InstallDamageLogging();
-    g_last_strike_ms = GetTickCount64();
+    if (!released || !arm || weapon <= 0)
+        return false;  // e.g. the game refused the attack (still recovering from the last one)
     CallCreatureWeapon(g_weapon_on_fn, arm, weapon);
     g_strike_arm = arm;
     g_strike_weapon = weapon;
@@ -831,7 +740,7 @@ static unsigned char* CreatureOf(int obj)
     }
 }
 
-bool EngineArmJoints(float out[5][3])
+bool EngineArmJoints(float out[][3], int count)
 {
     unsigned char* creature = CreatureOf(EngineArmObject());
     if (!creature)
@@ -840,7 +749,7 @@ bool EngineArmJoints(float out[5][3])
         const float* joints = *reinterpret_cast<float**>(creature + 0x19c);
         if (!joints)
             return false;
-        for (int j = 0; j < 5; ++j)
+        for (int j = 0; j < count; ++j)
             for (int k = 0; k < 3; ++k) {
                 float v = joints[j * 3 + k];
                 if (!(v == v) || std::fabs(v - joints[k]) > 20.0f)  // NaN, or far from the arm's root
@@ -864,7 +773,7 @@ void EngineLogArmWeapon()
 {
     int arm = EngineArmObject();
     unsigned char* creature = CreatureOf(arm);
-    Log("ArmDump: arm %d creature %p (weapon update saw %p)", arm, creature, g_arm_creature_seen);
+    Log("ArmDump: arm %d creature %p", arm, creature);
     if (creature) {
         __try {
             const float* joints = *reinterpret_cast<float**>(creature + 0x19c);

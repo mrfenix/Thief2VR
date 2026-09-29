@@ -154,6 +154,44 @@ inline float Dot(Vec3 a, Vec3 b)
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+inline Vec3 Cross(Vec3 a, Vec3 b)
+{
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+inline Vec3 Normalize(Vec3 v)
+{
+    float l = Length(v);
+    return l > 1e-6f ? v * (1.0f / l) : v;
+}
+
+// The shortest rotation taking unit vector a onto unit vector b.
+inline Mat3 RotationBetween(Vec3 a, Vec3 b)
+{
+    Vec3 axis = Cross(a, b);
+    float s = Length(axis), c = Dot(a, b);
+    Mat3 r;
+    if (s < 1e-6f)
+        return r;  // parallel (the opposite case doesn't occur for small blends)
+    axis = axis * (1.0f / s);
+    float t = 1 - c, x = axis.x, y = axis.y, z = axis.z;
+    r.m[0][0] = c + x * x * t;     r.m[0][1] = x * y * t - z * s; r.m[0][2] = x * z * t + y * s;
+    r.m[1][0] = y * x * t + z * s; r.m[1][1] = c + y * y * t;     r.m[1][2] = y * z * t - x * s;
+    r.m[2][0] = z * x * t - y * s; r.m[2][1] = z * y * t + x * s; r.m[2][2] = c + z * z * t;
+    return r;
+}
+
+// The two-handed bow's arrow line (unit, same space as the inputs): from the
+// string hand through the bow hand, blended in from the bow's own forward over
+// the first 10-20 cm of draw (while the hands are together the line is noise).
+inline Vec3 BowArrowLine(Vec3 bow_forward, Vec3 bow_hand, Vec3 string_hand)
+{
+    Vec3 line = bow_hand - string_hand;
+    float d = Length(line);
+    float w = d < 0.1f ? 0.0f : d > 0.2f ? 1.0f : (d - 0.1f) / 0.1f;
+    return Normalize(bow_forward * (1 - w) + (d > 1e-4f ? line * (w / d) : Vec3{}));
+}
+
 // Heading (rotation about up) of an engine-space orientation's forward axis.
 inline float HeadingOf(const Mat3& m)
 {
