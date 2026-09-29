@@ -418,7 +418,7 @@ bool VrOnPresent(IDirect3DDevice9* device)
     if (controllers.menu) {
         if (menu_held_ms == -1)
             menu_held_ms = 0;
-        else if (menu_held_ms >= 0 && (menu_held_ms += dt * 1000.0) >= 500.0) {
+        else if (menu_held_ms >= 0 && (menu_held_ms += dt * 1000.0) >= kMenuHoldSeconds * 1000.0) {
             MenuToggle(g_frame);
             menu_held_ms = -2;  // fired; wait for release
         }
@@ -509,7 +509,21 @@ bool VrOnPresent(IDirect3DDevice9* device)
         g_screen_placed = false;  // the next 2D screen appears where you look then
     if (!pointer_used)
         ScreenPointerIdle();
-    if (MenuUpdate(controllers, dt, menu_quad))
+    // A new mission (new game, loaded save, next mission): remind how to open the VR menu.
+    static int last_player;
+    if (in_scene) {
+        int player = EnginePlayerObject();
+        if (player && player != last_player) {
+            last_player = player;
+            if (s.show_menu_hint) {
+                char text[128];
+                snprintf(text, sizeof(text), "Hold the left menu button for %.1f seconds to open the VR menu",
+                         kMenuHoldSeconds);
+                MenuShowToast(text, 6.0);
+            }
+        }
+    }
+    if (MenuUpdate(controllers, dt, menu_quad) || MenuToastUpdate(dt, menu_quad))
         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu_quad);
 
     double end_start = VrNowMs();

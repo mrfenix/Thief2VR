@@ -165,6 +165,65 @@ void PinCorrection(Vec3 cam, const Mat3& rg, bool record, Mat3& rc, Vec3& tc)
     tc = idle_o - rc * cur.o;
 }
 
+// Weapon smoothing: a One Euro filter per hand (adaptive low-pass). Slow
+// movement is smoothed strongly (no jitter), fast movement hardly at all (swings
+// stay responsive): the cutoff frequency rises with the speed. Filters the grip
+// position and the aim orientation, the two parts of the pose the weapon uses.
+struct HandFilter {
+    bool valid = false;
+    XrTime last = 0;
+    Vec3 pos, speed;     // filtered position (m) and velocity (m/s)
+    Quat rot;            // filtered orientation
+    float turn = 0;      // filtered angular speed (rad/s)
+};
+HandFilter g_hand_filter[2];
+
+float SmoothingAlpha(float cutoff_hz, float dt)
+{
+    float tau = 1.0f / (2.0f * kPi * cutoff_hz);
+    return 1.0f / (1.0f + tau / dt);
+}
+
+void SmoothHand(int hand, XrTime time, XrPosef& grip, XrPosef& aim)
+{
+    const float strength = Config().weapon_smoothing;
+    HandFilter& f = g_hand_filter[hand];
+    Vec3 p{grip.position.x, grip.position.y, grip.position.z};
+    Quat q{aim.orientation.x, aim.orientation.y, aim.orientation.z, aim.orientation.w};
+    float dt = f.valid ? (float)((time - f.last) * 1e-9) : 0.0f;
+    if (strength <= 0 || !f.valid || dt <= 0 || dt > 0.2f) {
+        f.valid = true;
+        f.last = time;
+        f.pos = p;
+        f.speed = {};
+        f.rot = q;
+        f.turn = 0;
+        return;
+    }
+    f.last = time;
+    const float min_cutoff = 1.0f + (1.0f - strength) * 9.0f;  // Hz while still: 1 (strong) .. 10 (light)
+    const float speed_cutoff = 1.0f, beta_move = 10.0f, beta_turn = 2.0f;
+
+    f.speed = f.speed + ((p - f.pos) * (1.0f / dt) - f.speed) * SmoothingAlpha(speed_cutoff, dt);
+    f.pos = f.pos + (p - f.pos) * SmoothingAlpha(min_cutoff + beta_move * Length(f.speed), dt);
+
+    float d = q.x * f.rot.x + q.y * f.rot.y + q.z * f.rot.z + q.w * f.rot.w;
+    if (d < 0) {
+        q = {-q.x, -q.y, -q.z, -q.w};
+        d = -d;
+    }
+    float angle = 2.0f * std::acos(d > 1.0f ? 1.0f : d);
+    f.turn = f.turn + (angle / dt - f.turn) * SmoothingAlpha(speed_cutoff, dt);
+    float a = SmoothingAlpha(min_cutoff + beta_turn * f.turn, dt);
+    Quat r{f.rot.x + (q.x - f.rot.x) * a, f.rot.y + (q.y - f.rot.y) * a, f.rot.z + (q.z - f.rot.z) * a,
+           f.rot.w + (q.w - f.rot.w) * a};
+    float len = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+    f.rot = {r.x / len, r.y / len, r.z / len, r.w / len};
+
+    grip.position = {f.pos.x, f.pos.y, f.pos.z};
+    aim.orientation = {f.rot.x, f.rot.y, f.rot.z, f.rot.w};
+}
+
 Mat3 g_pin_rc;  // this frame's correction for the render
 Vec3 g_pin_tc;
 
@@ -412,6 +471,22 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             g_neutral_yaw * 180 / kPi, 2 * std::atan(tan_h) * 180 / kPi, 2 * std::atan(tan_v) * 180 / kPi, eye_w,
             eye_h);
     }
+    // Standing height: the neutral height follows the highest the head has been,
+    // so the view never rises above the game's eye height, whatever the height
+    // at recenter or the headset's floor setup. Small drift (within 15 cm, e.g.
+    // a recenter on tiptoe or a tracking shift) eases back down at 2 cm/s; a real
+    // crouch is lower than that and isn't affected.
+    {
+        static double last_ms = VrNowMs();
+        double now_ms = VrNowMs();
+        float dt = (float)min(0.1, (now_ms - last_ms) / 1000.0);
+        last_ms = now_ms;
+        float below = g_neutral_head.y - head.y;
+        if (below < 0)
+            g_neutral_head.y = head.y;
+        else if (below < 0.15f)
+            g_neutral_head.y -= min(below, 0.02f * dt);
+    }
     Mat3 unyaw = RotZ(-g_neutral_yaw);
     Vec3 raw_offset = unyaw * (basis * (head - g_neutral_head)) * Config().world_scale;
 
@@ -447,7 +522,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             head_offset.x *= limit / horiz;
             head_offset.y *= limit / horiz;
         }
-        head_offset.z = max(-limit, min(limit, head_offset.z));
+        head_offset.z = Config().vertical_head_tracking ? max(-limit, min(limit, head_offset.z)) : 0.0f;
     }
     g_last_head = head;
     g_last_head_offset = head_offset;
@@ -486,6 +561,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     g_arm_override = false;
     if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam &&
         XrControls().LocateHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose)) {
+        SmoothHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose);
         const float* cam_pos = reinterpret_cast<const float*>(cam + 2);
         const uint16_t* cam_ang = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
         g_arm_rg = RotZ(Angle16ToRad(cam_ang[2])) * RotY(Angle16ToRad(cam_ang[1])) * RotX(Angle16ToRad(cam_ang[0]));
@@ -504,6 +580,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         XrPosef string_grip, string_aim;
         if (bow_left && ControlsBowDrawing() &&
             XrControls().LocateHand(1, frame->display_time, string_grip, string_aim)) {
+            SmoothHand(1, frame->display_time, string_grip, string_aim);
             Mat3 to_world = world_yaw * unyaw * XrToEngineBasis();
             Vec3 forward = g_arm_rh * Vec3{1, 0, 0};
             Vec3 line = BowArrowLine(forward, to_world * ToVec(grip_pose.position),
@@ -534,6 +611,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     g_arm_dump_requested = false;
     if (g_arm_dump_active) {
         Log("ArmDump: ---- frame dump (arm drawn unmodified) ----");
+        EngineLogPlayerPhysics();
         EngineLogArmWeapon();
     }
 

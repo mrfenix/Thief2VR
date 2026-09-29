@@ -235,6 +235,11 @@ bool ResolveEngine()
     return true;
 }
 
+int EnginePlayerObject()
+{
+    return g_player_object ? *g_player_object : 0;
+}
+
 int EngineArmObject()
 {
     // DAT_00aa1410: player arm state; the arm object id is at +4.
@@ -996,6 +1001,32 @@ bool EngineMeleeBusy()
     // DAT_00890f9c winding up, DAT_00890f94 released, DAT_00890f98 swinging.
     return g_base && (*reinterpret_cast<int*>(g_base + 0x490f9c) || *reinterpret_cast<int*>(g_base + 0x490f94) ||
                       *reinterpret_cast<int*>(g_base + 0x490f98));
+}
+
+void EngineLogPlayerPhysics()
+{
+    int obj = g_player_object ? *g_player_object : 0;
+    unsigned char* model = obj && g_get_phys_model ? g_get_phys_model(obj) : nullptr;
+    unsigned char* pos = EngineObjectPosition(obj);
+    if (!model || !pos) {
+        Log("PhysDump: no player physics model");
+        return;
+    }
+    __try {
+        const float* p = reinterpret_cast<const float*>(pos);
+        unsigned char* subs = *reinterpret_cast<unsigned char**>(model + 0xf0);
+        const float* radii = *reinterpret_cast<float**>(model + 0x1f0);
+        Log("PhysDump: player %d at (%.3f %.3f %.3f), model %p flags %08x type %d", obj, p[0], p[1], p[2], model,
+            *reinterpret_cast<uint32_t*>(model + 0x20), **reinterpret_cast<int**>(model + 0xd0));
+        for (int i = 0; subs && i < 7; ++i) {
+            const float* s = reinterpret_cast<const float*>(subs + i * 0x48);
+            const uint16_t* a = reinterpret_cast<const uint16_t*>(subs + i * 0x48 + 0x10);
+            Log("PhysDump:   sub %d rel (%.3f %.3f %.3f) radius %.3f angles %u %u %u", i, s[0] - p[0], s[1] - p[1],
+                s[2] - p[2], radii ? radii[i] : -1.0f, a[0], a[1], a[2]);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("PhysDump: unreadable");
+    }
 }
 
 void EngineLogArmWeapon()

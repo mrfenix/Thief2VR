@@ -33,6 +33,17 @@ bool g_trigger_down;
 bool g_b_was_down;
 bool g_close_requested;
 
+// Notification ("toast"): a small head-locked panel below the view.
+constexpr int kToastW = 1024;
+constexpr int kToastH = 160;
+constexpr float kToastWidthM = 0.5f;
+ID3D11Texture2D* g_toast_tex;
+ID3D11RenderTargetView* g_toast_rtv;
+XrSwapchainD3D11 g_toast_swapchain;
+bool g_toast_ready, g_toast_failed;
+char g_toast_text[256];
+double g_toast_left;  // seconds until it's gone
+
 bool Init()
 {
     if (g_ready || g_failed)
@@ -111,6 +122,49 @@ void SettingWidget(const SettingInfo& s)
     ImGui::PopID();
 }
 
+// The controls reference (the Controls tab).
+void ControlsTab()
+{
+    struct Row {
+        const char* input;
+        const char* action;
+    };
+    static const Row rows[] = {
+        {"Left stick", "Move (in the direction you look)"},
+        {"Left stick click", "Toggle run"},
+        {"Right stick left / right", "Snap turn (or smooth turn, Comfort tab)"},
+        {"Right stick up", "Jump"},
+        {"Right stick down", "Toggle crouch"},
+        {"Right stick click", "Map"},
+        {"Right trigger", "Use weapon: hold to draw the bow, release to fire"},
+        {"Swing the right hand", "Attack with the sword / blackjack"},
+        {"Right grip", "Frob: pick up, open, use the selected item"},
+        {"Left trigger", "Block"},
+        {"Left grip", "Hold crouch"},
+        {"A", "Next weapon"},
+        {"B", "Put the weapon away"},
+        {"X / Y", "Next / previous item"},
+        {"Hold Y", "Objectives"},
+        {"Left menu button", "Tap: game menu. Hold: this VR menu"},
+        {"Crouch / lean with your body", "Crouch / lean in the game"},
+        {"Two-handed bow (Hands tab)", "Bow in the left hand; squeeze the right grip at the bow, pull back, let go"},
+        {"Game menus, map, books", "Point with the right hand, trigger = click, B = back"},
+        {"Keyboard", "F7 desktop mirror, F8 recenter, F10 this menu"},
+    };
+    if (ImGui::BeginTable("controls", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("input", ImGuiTableColumnFlags_WidthFixed, 400.0f);
+        ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthStretch);
+        for (const Row& r : rows) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextWrapped("%s", r.input);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextWrapped("%s", r.action);
+        }
+        ImGui::EndTable();
+    }
+}
+
 void BuildUi()
 {
     int count;
@@ -125,6 +179,7 @@ void BuildUi()
         if (!known && strcmp(settings[i].tab, "Performance") != 0)
             tabs.push_back(settings[i].tab);
     }
+    tabs.insert(tabs.begin(), "Controls");
     tabs.push_back("Performance");
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -142,7 +197,10 @@ void BuildUi()
         for (const char* tab : tabs) {
             if (!ImGui::BeginTabItem(tab))
                 continue;
-            ImGui::BeginChild("items", ImVec2(0, -80));
+            bool controls = strcmp(tab, "Controls") == 0;
+            ImGui::BeginChild("items", ImVec2(0, controls ? 0.0f : -80.0f));
+            if (controls)
+                ControlsTab();
             for (int i = 0; i < count; ++i)
                 if (strcmp(settings[i].tab, tab) == 0)
                     SettingWidget(settings[i]);
@@ -151,7 +209,7 @@ void BuildUi()
                 ImGui::TextWrapped("%s", VrTimingSummary());
             }
             ImGui::EndChild();
-            if (ImGui::Button("Reset this tab to defaults"))
+            if (!controls && ImGui::Button("Reset this tab to defaults"))
                 ResetSettingsTab(tab);
             ImGui::EndTabItem();
         }
@@ -202,6 +260,7 @@ bool MenuUpdate(const XrControllerState& c, double dt, XrCompositionLayerQuad& q
         return false;
 
     ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)kTexW, (float)kTexH);
     io.DeltaTime = (float)(dt > 0.001 ? dt : 0.001);
     ImVec2 pointer;
     if (c.active && PointerOnPanel(c, pointer))
@@ -253,5 +312,86 @@ bool MenuUpdate(const XrControllerState& c, double dt, XrCompositionLayerQuad& q
     quad.subImage.imageRect = {{0, 0}, {kTexW, kTexH}};
     quad.pose = g_pose;
     quad.size = {kWidthM, kWidthM * kTexH / kTexW};
+    return true;
+}
+
+void MenuShowToast(const char* text, double seconds)
+{
+    strncpy_s(g_toast_text, text, _TRUNCATE);
+    g_toast_left = seconds;
+}
+
+bool MenuToastUpdate(double dt, XrCompositionLayerQuad& quad)
+{
+    if (g_toast_left <= 0)
+        return false;
+    g_toast_left -= dt;
+    if (g_toast_left <= 0 || !Init())
+        return false;
+    if (!g_toast_ready && !g_toast_failed) {
+        g_toast_failed = true;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = kToastW;
+        td.Height = kToastH;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = Xr().color_format_is_rgba() ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (SUCCEEDED(Xr().device()->CreateTexture2D(&td, nullptr, &g_toast_tex)) &&
+            SUCCEEDED(Xr().device()->CreateRenderTargetView(g_toast_tex, nullptr, &g_toast_rtv)) &&
+            g_toast_swapchain.Create(Xr().session(), Xr().color_format(), kToastW, kToastH)) {
+            g_toast_failed = false;
+            g_toast_ready = true;
+        } else {
+            Log("Menu: could not create the notification panel");
+        }
+    }
+    if (!g_toast_ready)
+        return false;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)kToastW, (float)kToastH);
+    io.DeltaTime = (float)(dt > 0.001 ? dt : 0.001);
+    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    ImGui_ImplDX11_NewFrame();
+    ImGui::NewFrame();
+    float alpha = (float)(g_toast_left < 1.0 ? g_toast_left : 1.0);  // fade out over the last second
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("toast", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings);
+    ImVec2 size = ImGui::CalcTextSize(g_toast_text, nullptr, false, kToastW - 60.0f);
+    ImGui::SetCursorPos(ImVec2((kToastW - size.x) * 0.5f, (kToastH - size.y) * 0.5f));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + size.x);
+    ImGui::TextUnformatted(g_toast_text);
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::Render();
+
+    ID3D11DeviceContext* ctx = Xr().context();
+    const float clear[4] = {0, 0, 0, 0};
+    ctx->ClearRenderTargetView(g_toast_rtv, clear);
+    ctx->OMSetRenderTargets(1, &g_toast_rtv, nullptr);
+    D3D11_VIEWPORT vp{0, 0, (float)kToastW, (float)kToastH, 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    if (ID3D11Texture2D* image = g_toast_swapchain.Acquire()) {
+        ctx->CopyResource(image, g_toast_tex);
+        g_toast_swapchain.Release();
+    }
+
+    quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = Xr().view_space();
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.subImage.swapchain = g_toast_swapchain.handle();
+    quad.subImage.imageRect = {{0, 0}, {kToastW, kToastH}};
+    quad.pose.orientation.w = 1.0f;
+    quad.pose.position = {0.0f, -0.12f, -0.9f};
+    quad.size = {kToastWidthM, kToastWidthM * kToastH / kToastW};
     return true;
 }

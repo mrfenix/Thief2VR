@@ -62,6 +62,9 @@ bool EngineWorldYaw(float& radians);  // false until the player camera has run
 // Once per frame: F11 logs every object position update for two frames.
 void EngineTraceTick();
 
+// The player object, or 0 before a mission (a new id per mission / load).
+int EnginePlayerObject();
+
 // The first-person arm (weapon) object, or 0 if none, and an object's
 // Position (float x,y,z at +0; 16-bit bank/pitch/heading at +0x10), or null.
 int EngineArmObject();
@@ -86,6 +89,10 @@ void EngineSetWeaponPointTransform(WeaponPointTransform transform);
 
 // Logs the arm's weapon spheres and joint positions (F12 dump).
 void EngineLogArmWeapon();
+
+// Logs the player's physics body: each submodel's position relative to the
+// player, radius and angles (F12 dump).
+void EngineLogPlayerPhysics();
 
 // VR melee: the swing decides when the weapon hits, not the arm animation.
 // While enabled, the animation's own hits-on/off callbacks are ignored and
