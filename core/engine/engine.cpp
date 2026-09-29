@@ -18,6 +18,7 @@ static void __cdecl CameraUpdateDetour();
 static void* g_objpos_update_trampoline;
 static void ObjPosUpdateDetour();
 static void InstallWeaponHooks();
+static void InstallListenerHooks();
 
 namespace {
 
@@ -230,6 +231,7 @@ bool ResolveEngine()
     } else {
         Log("Engine: player input signatures mismatch, VR controls disabled");
     }
+    InstallListenerHooks();
     return true;
 }
 
@@ -642,7 +644,229 @@ __declspec(naked) int __cdecl CallCreatureWeapon(void* /*fn*/, int /*creature_ob
     }
 }
 
+// --- Melee hit feedback ---
+// The damage model (IDamageModel via AppGetObj FUN_00677250, stdcall, with the
+// IID at 0x007e72d0): slot 3 HandleImpact and slot 4 DamageObject, both
+// __stdcall(this, victim, culprit, data, ...). Calls involving the player's
+// melee weapon shortly after a swing become hit events (EngineTakeMeleeHits).
+void* g_dmg_tramp[2];
+int g_melee_weapon;       // the weapon of the last strike
+ULONGLONG g_melee_until;  // hit events count until this time (GetTickCount64)
+int g_melee_events;
+bool g_strike_stopped;    // the open window's weapon lost its physics (hit a wall)
+
+void __cdecl OnDamageCall(int slot, int victim, int culprit)
+{
+    if (!g_melee_weapon || GetTickCount64() > g_melee_until)
+        return;
+    if (culprit == g_melee_weapon || victim == g_melee_weapon)
+        g_melee_events |= slot == 4 ? kMeleeHitDamage : kMeleeHitImpact;
+}
+
+// Arity-agnostic: reads victim/culprit, then continues into the original.
+#define DAMAGE_THUNK(n)                                                                                   \
+    __declspec(naked) void DamageThunk##n()                                                               \
+    {                                                                                                     \
+        __asm pushad                                                                                      \
+        __asm push dword ptr [esp + 44]                                                                   \
+        __asm push dword ptr [esp + 44]                                                                   \
+        __asm push n                                                                                      \
+        __asm call OnDamageCall                                                                           \
+        __asm add esp, 12                                                                                 \
+        __asm popad                                                                                       \
+        __asm jmp dword ptr [g_dmg_tramp + (n - 3) * 4]                                                   \
+    }
+DAMAGE_THUNK(3)
+DAMAGE_THUNK(4)
+
+// Calls an engine function fn(arg), saving every register and restoring the
+// stack pointer afterwards, so it works whether fn pops its argument (stdcall,
+// like AppGetObj: RET 4) or not, and whether or not it preserves registers.
+__declspec(naked) void* __cdecl CallEngine1(void* /*fn*/, const void* /*arg*/)
+{
+    __asm {
+        push ebx
+        push esi
+        push edi
+        push ebp
+        mov ebp, esp
+        push dword ptr [ebp + 24]
+        call dword ptr [ebp + 20]
+        mov esp, ebp
+        pop ebp
+        pop edi
+        pop esi
+        pop ebx
+        ret
+    }
+}
+
+// Hooks the damage model on the first strike (it exists once a mission runs).
+void InstallHitFeedback()
+{
+    static bool tried;
+    if (tried)
+        return;
+    tried = true;
+    void** model = static_cast<void**>(CallEngine1(g_base + 0x277250, g_base + 0x3e72d0));
+    if (!model) {
+        Log("Melee: no damage model; no hit feedback");
+        return;
+    }
+    void** vtable = reinterpret_cast<void**>(*model);
+    void* thunks[2] = {&DamageThunk3, &DamageThunk4};
+    MH_STATUS st = MH_OK;
+    for (int i = 0; i < 2 && st == MH_OK; ++i) {
+        st = MH_CreateHook(vtable[3 + i], thunks[i], &g_dmg_tramp[i]);
+        if (st == MH_OK)
+            st = MH_EnableHook(vtable[3 + i]);
+    }
+    Log("Melee: hit feedback hooks %s", MH_StatusToString(st));
+    // AppGetObj added a reference; the damage model lives as long as the game.
+    reinterpret_cast<unsigned long(__stdcall*)(void*)>(vtable[2])(model);
+}
+
 } // namespace
+
+// --- Audio listener follows the head ---
+// NewDark's sound driver is a DirectSound3D-style listener on OpenAL. Its
+// methods take vectors in engine world space (x, y, z; z up) and convert them
+// for OpenAL (al = -y, z, -x):
+//   0x006ac700 SetPosition(this, const float pos[3])                  RET 8  -> AL_POSITION
+//   0x006ac7b0 SetOrientation(this, const float front[3], top[3])     RET 0xc -> AL_ORIENTATION
+// The game feeds them the player camera, whose heading follows the aiming hand
+// in VR; while a head pose is set they get the head's instead.
+namespace {
+void* g_listener_pos_tramp;
+void* g_listener_ori_tramp;
+float g_head_pos[3], g_head_front[3], g_head_top[3];
+ULONGLONG g_head_until;  // the head pose is used until this time (GetTickCount64)
+
+int __stdcall ListenerPositionDetour(void* self, const float* pos)
+{
+    if (GetTickCount64() <= g_head_until)
+        pos = g_head_pos;
+    return reinterpret_cast<int(__stdcall*)(void*, const float*)>(g_listener_pos_tramp)(self, pos);
+}
+
+// Most of the game's 3D sounds are positioned relative to the listener
+// (AL_SOURCE_RELATIVE, set by 0x006b5280 SetMode), in the frame of the player
+// camera (x forward, y left, z up), which OpenAL doesn't rotate by the listener
+// orientation. Their positions are re-expressed in the head's frame:
+//   p' = R_head^T (R_camera p + camera - head)
+//   0x006b4fb0 SetPosition(this, const float pos[3])  RET 8; OpenAL source id at this+0x11d
+void* g_source_pos_tramp;
+int(__cdecl* g_al_get_sourcei)(unsigned, int, int*);
+
+bool SourceIsRelative(unsigned char* source)
+{
+    if (!g_al_get_sourcei) {
+        HMODULE al = *reinterpret_cast<HMODULE*>(g_base + 0x69d588);  // DAT_00a9d588: the OpenAL module
+        if (!al)
+            return false;
+        g_al_get_sourcei = reinterpret_cast<int(__cdecl*)(unsigned, int, int*)>(GetProcAddress(al, "alGetSourcei"));
+        if (!g_al_get_sourcei)
+            return false;
+    }
+    int id = *reinterpret_cast<int*>(source + 0x11d);
+    int relative = 0;
+    if (id != -1)
+        g_al_get_sourcei(static_cast<unsigned>(id), 0x202 /* AL_SOURCE_RELATIVE */, &relative);
+    return relative != 0;
+}
+
+bool HeadRelativePosition(const float* p, float out[3])
+{
+    int* cam = *g_engine.current_camera;
+    if (!cam || GetTickCount64() > g_head_until)
+        return false;
+    const float* c = reinterpret_cast<const float*>(cam + 2);
+    const uint16_t* a = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
+    Mat3 camera = RotZ(a[2] * (2 * kPi / 65536.0f)) * RotY(a[1] * (2 * kPi / 65536.0f)) *
+                  RotX(a[0] * (2 * kPi / 65536.0f));
+    Vec3 x{g_head_front[0], g_head_front[1], g_head_front[2]}, z{g_head_top[0], g_head_top[1], g_head_top[2]};
+    Vec3 y = Cross(z, x);
+    Vec3 world = camera * Vec3{p[0], p[1], p[2]} + Vec3{c[0] - g_head_pos[0], c[1] - g_head_pos[1], c[2] - g_head_pos[2]};
+    out[0] = Dot(x, world);
+    out[1] = Dot(y, world);
+    out[2] = Dot(z, world);
+    return true;
+}
+
+int __stdcall SourcePositionDetour(unsigned char* self, const float* pos)
+{
+    float head_rel[3];
+    if (GetTickCount64() <= g_head_until && SourceIsRelative(self) && HeadRelativePosition(pos, head_rel))
+        pos = head_rel;
+    return reinterpret_cast<int(__stdcall*)(unsigned char*, const float*)>(g_source_pos_tramp)(self, pos);
+}
+
+int __stdcall ListenerOrientationDetour(void* self, const float* front, const float* top)
+{
+    if (GetTickCount64() <= g_head_until) {
+        front = g_head_front;
+        top = g_head_top;
+    }
+    return reinterpret_cast<int(__stdcall*)(void*, const float*, const float*)>(g_listener_ori_tramp)(self, front,
+                                                                                                        top);
+}
+} // namespace
+
+static void InstallListenerHooks()
+{
+    unsigned char* set_pos = g_base + 0x2ac700;
+    unsigned char* set_ori = g_base + 0x2ac7b0;
+    if (!Matches(set_pos, "8b 44 24 08 8b 08 56 8b 74 24 08 83 be 45 01 00 00 00") ||
+        !Matches(set_ori, "8b 44 24 08 8b 08 83 ec 18 56 8b 74 24 20 83 be 45 01 00 00 00")) {
+        Log("Engine: sound listener signatures mismatch; sound stays relative to the body");
+        return;
+    }
+    MH_STATUS st = MH_CreateHook(set_pos, reinterpret_cast<void*>(&ListenerPositionDetour), &g_listener_pos_tramp);
+    if (st == MH_OK)
+        st = MH_CreateHook(set_ori, reinterpret_cast<void*>(&ListenerOrientationDetour), &g_listener_ori_tramp);
+    if (st == MH_OK)
+        st = MH_EnableHook(set_pos);
+    if (st == MH_OK)
+        st = MH_EnableHook(set_ori);
+    Log("Engine: sound listener hooks %s", MH_StatusToString(st));
+
+    unsigned char* source_pos = g_base + 0x2b4fb0;
+    if (!Matches(source_pos, "8b 44 24 08 8b 4c 24 04 8b 10 89 91 d1 00 00 00")) {
+        Log("Engine: sound source signature mismatch; relative sounds stay relative to the body");
+        return;
+    }
+    st = MH_CreateHook(source_pos, reinterpret_cast<void*>(&SourcePositionDetour), &g_source_pos_tramp);
+    if (st == MH_OK)
+        st = MH_EnableHook(source_pos);
+    Log("Engine: sound source hook %s", MH_StatusToString(st));
+}
+
+void EngineSetListenerPose(const float pos[3], const float front[3], const float top[3])
+{
+    for (int i = 0; i < 3; ++i) {
+        g_head_pos[i] = pos[i];
+        g_head_front[i] = front[i];
+        g_head_top[i] = top[i];
+    }
+    g_head_until = GetTickCount64() + 250;
+}
+
+void EngineClearListenerPose()
+{
+    g_head_until = 0;
+}
+
+int EngineTakeMeleeHits()
+{
+    // A wall stops the swing: the engine takes the weapon's physics away.
+    if (g_strike_weapon && !g_strike_stopped && g_get_phys_model && !g_get_phys_model(g_strike_weapon)) {
+        g_strike_stopped = true;
+        g_melee_events |= kMeleeHitWall;
+    }
+    int events = g_melee_events;
+    g_melee_events = 0;
+    return events;
+}
 
 void EngineSetVrMelee(bool enabled)
 {
@@ -657,6 +881,7 @@ bool EngineMeleeStrike(bool open)
         if (g_strike_weapon)
             CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
         g_strike_arm = g_strike_weapon = 0;
+        g_melee_until = GetTickCount64() + 300;  // late hit reports still count
         return true;
     }
     // Only after the engine accepted the attack (released, swing pending).
@@ -665,9 +890,13 @@ bool EngineMeleeStrike(bool open)
     int weapon = CallCurWeapon(*g_player_object);
     if (!released || !arm || weapon <= 0)
         return false;  // e.g. the game refused the attack (still recovering from the last one)
+    InstallHitFeedback();
     CallCreatureWeapon(g_weapon_on_fn, arm, weapon);
     g_strike_arm = arm;
     g_strike_weapon = weapon;
+    g_strike_stopped = false;
+    g_melee_weapon = weapon;
+    g_melee_until = GetTickCount64() + 1500;
     return true;
 }
 

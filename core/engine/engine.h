@@ -94,6 +94,19 @@ void EngineLogArmWeapon();
 void EngineSetVrMelee(bool enabled);
 bool EngineMeleeStrike(bool open);
 
+// What the player's melee strikes hit since the last call (bit mask), for
+// haptics: damage dealt, an impact (a blocked blade, an object), or a wall
+// stopping the swing.
+constexpr int kMeleeHitDamage = 1, kMeleeHitImpact = 2, kMeleeHitWall = 4;
+int EngineTakeMeleeHits();
+
+// Sound: the listener (the ears) at the head instead of the player camera,
+// whose heading follows the aiming hand. Engine world space: position in feet,
+// front / top unit vectors. Call every frame; it lapses after 250 ms, or clear it
+// (e.g. for the scouting orb or other cameras, which keep their own listener).
+void EngineSetListenerPose(const float pos[3], const float front[3], const float top[3]);
+void EngineClearListenerPose();
+
 // The first-person arm's first `count` joints (world space), or false.
 // Sword / blackjack arm (5): 0 root, 1-2 arm, 3 hand, 4 weapon tip.
 // Bow arm (8): 0 root, 1 shoulder, 2 elbow, 3 wrist; 3, 4, 6 rigid (the hand on

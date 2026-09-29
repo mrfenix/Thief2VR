@@ -133,6 +133,18 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - At rest the bow is lowered and tilted.
 - Thief2VR always pins the bow to this full-draw pose and puts its grip (between 4 and 6) in the hand. Camera-forward then maps to the arrow direction.
 
+### Sound listener
+- NewDark's sound driver is a DirectSound3D-style interface on OpenAL. The OpenAL entry points are resolved by name in `FUN_006aa0c0`: `alListener3f` → `DAT_00a9b978`, `alListenerfv` → `DAT_00a9ca1c`.
+- Listener methods (`__stdcall`, `this` first). Vectors are in engine world space and converted to OpenAL as `(-y, z, -x)`:
+  - `0x006ac700` SetPosition(pos), RET 8, sets `AL_POSITION`, scaled by `this+0x13d`;
+  - `0x006ac7b0` SetOrientation(front, top), RET 0xc, sets `AL_ORIENTATION`;
+  - `0x006ac870` SetVelocity(vel), RET 8.
+- The game feeds these from the player camera. With VR, Thief2VR substitutes the head's position and orientation (player camera mode only).
+- **Sources:**
+  - `0x006b4fb0` SetPosition(this, pos), RET 8. It sets `AL_POSITION` through `alSource3f` (`DAT_00a9ca18`); the source id is at `this+0x11d` and the position is stored at `this+0xd1`.
+  - `0x006b5280` SetMode(this, mode) sets `AL_SOURCE_RELATIVE = (mode != 1)`, with the mode at `this+0x105`.
+- Most 3D sounds are **listener-relative**, in the player camera's frame (x forward, y left, z up), and OpenAL doesn't rotate relative sources by the listener orientation. Thief2VR re-expresses those positions in the head's frame: `p' = R_head^T (R_camera p + camera - head)`. Relative sources are detected with `alGetSourcei(AL_SOURCE_RELATIVE)`, loaded from the OpenAL module at `DAT_00a9d588`.
+
 ### Menus / 2D screens (mouse)
 - The exe imports `GetCursorPos`, `SetCursorPos`, `ClipCursor`, `ScreenToClient` and `ClientToScreen`. It also loads `dinput.dll` (`DirectInputCreateA`) and raw input (`RegisterRawInputDevices` / `GetRawInputData`, cfg `raw_mouse_input`).
 - Thief2VR drives the menus with `SetCursorPos` plus `SendInput` (real OS input, so every path above sees it). See `core/input/screen_pointer.cpp`.

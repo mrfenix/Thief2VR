@@ -254,6 +254,16 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     //     the arm animation says. Opens as the attack is released (the engine
     //     has then registered it), stays open while the blade moves fast.
     EngineSetVrMelee(s.swing_to_attack);
+    // Hit feedback on the weapon hand: a solid thump for a hit that did damage
+    // (or a knockout), a jolt when a wall stops the swing, a sharper knock for a
+    // blocked blade or an object.
+    int hits = EngineTakeMeleeHits();
+    if (hits & kMeleeHitDamage)
+        XrControls().Vibrate(1, 1.0f, 0.12f);
+    else if (hits & kMeleeHitWall)
+        XrControls().Vibrate(1, 0.8f, 0.08f);
+    else if (hits & kMeleeHitImpact)
+        XrControls().Vibrate(1, 0.6f, 0.06f);
     if (g_strike_time >= 0) {
         g_strike_time += dt;
         bool slowed = g_strike_time > 0.25 && tip_speed < s.swing_speed * 0.35f;

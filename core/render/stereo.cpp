@@ -462,6 +462,20 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         yaw = Angle16ToRad(body.heading);
     Mat3 world_yaw = RotZ(yaw);
 
+    // Sound: the ears go where the head is and face where it looks (the game
+    // would use the body, which follows the aiming hand). Other cameras keep
+    // the game's listener.
+    if (g_head.camera_mode == 0) {
+        Mat3 head_world = world_yaw * unyaw * head_rot;
+        Vec3 ears = Vec3{body.x, body.y, body.z} + world_yaw * head_offset;
+        const float pos3[3] = {ears.x, ears.y, ears.z};
+        const float front[3] = {head_world.m[0][0], head_world.m[1][0], head_world.m[2][0]};
+        const float top[3] = {head_world.m[0][2], head_world.m[1][2], head_world.m[2][2]};
+        EngineSetListenerPose(pos3, front, top);
+    } else {
+        EngineClearListenerPose();
+    }
+
     // Weapon in hand: the frame the arm should be drawn in (H) and the game
     // camera it's placed relative to (G). The arm render hook uses them.
     // The bow is held in the left hand when two-handed (the right one draws).
