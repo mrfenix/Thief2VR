@@ -18,8 +18,10 @@ function Fail($msg) {
 }
 
 if (-not $GameDir) {
-    if (Test-Path (Join-Path $here 'Thief2.exe')) { $GameDir = $here }
-    else { $GameDir = Read-Host 'Path to your Thief 2 folder (the one with Thief2.exe)' }
+    $parent = Split-Path -Parent $here
+    if (Test-Path (Join-Path $parent 'Thief2.exe')) { $GameDir = $parent }
+    elseif (Test-Path (Join-Path $here 'Thief2.exe')) { $GameDir = $here }
+    else { Fail "Run uninstall.bat from the Thief2VR folder inside your Thief 2 folder (the one with Thief2.exe)." }
 }
 $GameDir = $GameDir.Trim('"')
 if (-not (Test-Path (Join-Path $GameDir 'Thief2.exe'))) { Fail "Thief2.exe not found in '$GameDir'." }
@@ -84,3 +86,4 @@ if ($state -and (Test-Path $camPath)) {
 Remove-Item $statePath -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host 'Thief2VR is uninstalled. Your VR settings (thief2vr.ini) and log were left in the game folder.' -ForegroundColor Green
+Write-Host 'You can now delete the Thief2VR folder.'

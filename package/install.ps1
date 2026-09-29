@@ -1,7 +1,7 @@
-# Thief2VR installer. Run install.bat (or this script) from the extracted mod
-# folder. Copies the mod into the Thief 2 folder and applies the game settings
-# it needs; every change is recorded in thief2vr_install.json so uninstall.ps1
-# can undo it.
+# Thief2VR installer. The Thief2VR folder goes inside the Thief 2 folder (the
+# one with Thief2.exe); run install.bat from there. Copies the mod into the
+# game folder and applies the game settings it needs; every change is recorded
+# in thief2vr_install.json so uninstall.ps1 can undo it.
 # Usage: install.ps1 [-GameDir <Thief 2 folder>] [-Force]
 param(
     [string]$GameDir,
@@ -39,10 +39,16 @@ function Fail($msg) {
     exit 1
 }
 
-# --- Find the game ---------------------------------------------------------
+# --- Find the game: the folder this Thief2VR folder was placed in ------------
 if (-not $GameDir) {
-    if (Test-Path (Join-Path $here 'Thief2.exe')) { $GameDir = $here }
-    else { $GameDir = Read-Host 'Path to your Thief 2 folder (the one with Thief2.exe)' }
+    $parent = Split-Path -Parent $here
+    if (Test-Path (Join-Path $parent 'Thief2.exe')) { $GameDir = $parent }
+    elseif (Test-Path (Join-Path $here 'Thief2.exe')) { $GameDir = $here }
+    else {
+        Fail ("The Thief2VR folder isn't inside your Thief 2 folder.`n" +
+              "Move the whole Thief2VR folder into the Thief 2 folder (the one with Thief2.exe),`n" +
+              "for example ...\steamapps\common\thief_2\Thief2VR, then run install.bat again.")
+    }
 }
 $GameDir = $GameDir.Trim('"')
 $exe = Join-Path $GameDir 'Thief2.exe'

@@ -21,10 +21,13 @@ if (-not $NoBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 }
 
+# The zip holds one folder, Thief2VR, which players extract into their Thief 2
+# folder; install.bat finds the game in its parent folder.
 $name = "Thief2VR-$version"
 $dist = Join-Path $root 'dist'
-$stage = Join-Path $dist $name
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+$stageRoot = Join-Path $dist $name
+$stage = Join-Path $stageRoot 'Thief2VR'
+if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $stage 'licenses') | Out-Null
 
@@ -49,6 +52,6 @@ Copy-Item (Join-Path $root 'third_party\openxr\share\doc\openxr\LICENSE') (Join-
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+Compress-Archive -Path $stage -DestinationPath $zip
 "packaged $zip"
-Get-ChildItem $stage -Recurse | Select-Object -ExpandProperty FullName | ForEach-Object { "  " + $_.Substring($stage.Length + 1) }
+Get-ChildItem $stage -Recurse | Select-Object -ExpandProperty FullName | ForEach-Object { "  " + $_.Substring($stageRoot.Length + 1) }

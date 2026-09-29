@@ -21,9 +21,10 @@ REQUIREMENTS
 INSTALL
 -------
 1. Install T2Fix and check that the game runs normally.
-2. Extract this zip anywhere (or straight into the Thief 2 folder).
-3. Run install.bat. If it isn't in the Thief 2 folder, it asks where the
-   game is (the folder with Thief2.exe).
+2. Extract this zip into your Thief 2 folder (the one with Thief2.exe).
+   You get a Thief2VR folder inside it, for example:
+     ...\steamapps\common\thief_2\Thief2VR
+3. Open that Thief2VR folder and run install.bat.
 
 The installer copies the mod files into the game folder and changes a few
 game settings: windowed mode (the headset renders at its own resolution),
@@ -97,8 +98,9 @@ TROUBLESHOOTING
 
 UNINSTALL
 ---------
-Run uninstall.bat. It removes the mod and restores the game settings it
-changed. Your VR settings (thief2vr.ini) are left in place.
+Run uninstall.bat in the Thief2VR folder. It removes the mod and restores
+the game settings it changed. Your VR settings (thief2vr.ini) are left in
+place. Afterwards you can delete the Thief2VR folder.
 
 
 LICENCE AND CREDITS
