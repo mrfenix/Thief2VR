@@ -100,6 +100,8 @@ void EngineLogPlayerPhysics();
 // right after "use_weapon" was released) and closes the hit window.
 void EngineSetVrMelee(bool enabled);
 bool EngineMeleeStrike(bool open);
+// The player's current weapon object while a sword / blackjack is out, else 0.
+int EngineCurrentWeapon();
 
 // What the player's melee strikes hit since the last call (bit mask), for
 // haptics: damage dealt, an impact (a blocked blade, an object), or a wall

@@ -107,4 +107,5 @@ LICENCE AND CREDITS
 -------------------
 Thief2VR is released under the MIT License (LICENSE.txt). Thief 2 itself
 isn't included; you need your own copy. Uses MinHook (BSD 2-clause), Dear ImGui (MIT) and the Khronos OpenXR loader
-(Apache 2.0); their licences are in the licenses folder.
+(Apache 2.0). The hands are based on the WebXR generic hand models (MIT,
+Copyright 2019 Amazon). The licences are in the licenses folder.

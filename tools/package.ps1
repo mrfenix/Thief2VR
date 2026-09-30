@@ -49,6 +49,7 @@ $license = [System.IO.File]::ReadAllText((Join-Path $root 'LICENSE')) -replace "
 Copy-Item (Join-Path $root 'third_party\minhook\LICENSE.txt') (Join-Path $stage 'licenses\MinHook.txt')
 Copy-Item (Join-Path $root 'third_party\imgui\LICENSE.txt') (Join-Path $stage 'licenses\DearImGui.txt')
 Copy-Item (Join-Path $root 'third_party\openxr\share\doc\openxr\LICENSE') (Join-Path $stage 'licenses\OpenXR-loader.txt')
+Copy-Item (Join-Path $root 'third_party\generic-hand\LICENSE.md') (Join-Path $stage 'licenses\WebXR-generic-hand.txt')
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }

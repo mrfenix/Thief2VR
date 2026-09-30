@@ -5,6 +5,7 @@
 
 #include <intrin.h>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -55,6 +56,40 @@ struct Redirect {
 } g_redirect;
 
 bool g_position_rhw;  // current vertex format is pre-transformed (XYZRHW / POSITIONT)
+int g_uv_offset = -1;       // byte offset of the first texture coordinates, or -1
+int g_color_offset = -1;    // byte offset of the diffuse colour, or -1
+DrawCapture g_capture;
+
+// Passes the triangles of a pre-transformed draw to the capture callback.
+void CaptureTriangles(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT prims, const void* data, UINT stride,
+                      const void* idx, D3DFORMAT idx_fmt)
+{
+    if (!g_capture.callback || !g_position_rhw || !data ||
+        (t != D3DPT_TRIANGLELIST && t != D3DPT_TRIANGLESTRIP && t != D3DPT_TRIANGLEFAN))
+        return;
+    IDirect3DBaseTexture9* texture = nullptr;
+    d->GetTexture(0, &texture);
+    for (UINT p = 0; p < prims; ++p) {
+        CapturedVertex tri[3];
+        for (UINT k = 0; k < 3; ++k) {
+            UINT i = t == D3DPT_TRIANGLELIST ? p * 3 + k : t == D3DPT_TRIANGLESTRIP ? p + k : (k == 0 ? 0 : p + k);
+            if (idx)
+                i = idx_fmt == D3DFMT_INDEX32 ? static_cast<const uint32_t*>(idx)[i] : static_cast<const uint16_t*>(idx)[i];
+            const unsigned char* v = static_cast<const unsigned char*>(data) + i * stride;
+            const float* f = reinterpret_cast<const float*>(v);
+            tri[k] = {f[0], f[1], f[2], f[3], 0, 0, 0xffffffffu};
+            if (g_uv_offset >= 0) {
+                tri[k].u = reinterpret_cast<const float*>(v + g_uv_offset)[0];
+                tri[k].v = reinterpret_cast<const float*>(v + g_uv_offset)[1];
+            }
+            if (g_color_offset >= 0)
+                tri[k].diffuse = *reinterpret_cast<const unsigned*>(v + g_color_offset);
+        }
+        g_capture.callback(tri, texture, g_capture.user);
+    }
+    if (texture)
+        texture->Release();
+}
 void (*g_draw_probe)();  // one-shot, see SetDrawProbe
 
 void RunDrawProbe()
@@ -350,6 +385,8 @@ HRESULT STDMETHODCALLTYPE HookClear(IDirect3DDevice9* d, DWORD n, const D3DRECT*
                                     float z, DWORD s)
 {
     Trace(_AddressOfReturnAddress(), "Clear(%u rects, flags %x)", n, flags);
+    if (g_capture.skip_draw)
+        return D3D_OK;
     if (g_redirect.scaling && n && rects) {
         std::vector<D3DRECT> scaled(rects, rects + n);
         for (auto& r : scaled) {
@@ -400,6 +437,8 @@ HRESULT STDMETHODCALLTYPE HookDrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYP
     RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawPrimitive(type %d)", t);
+    if (g_capture.skip_draw)
+        return D3D_OK;
     if (g_redirect.scaling && g_position_rhw) {
         static int logged;
         if (logged++ < 5)
@@ -414,6 +453,8 @@ HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMI
     RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawIndexedPrimitive(type %d)", t);
+    if (g_capture.skip_draw)
+        return D3D_OK;
     if (g_redirect.scaling && g_position_rhw) {
         static int logged;
         if (logged++ < 5)
@@ -428,6 +469,9 @@ HRESULT STDMETHODCALLTYPE HookDrawPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVET
     RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawPrimitiveUP(type %d stride %u)", t, stride);
+    CaptureTriangles(d, t, count, data, stride, nullptr, D3DFMT_UNKNOWN);
+    if (g_capture.skip_draw)
+        return D3D_OK;
     if (g_redirect.scaling && g_position_rhw && data)
         data = ScaledVertices(data, VertexCount(t, count), stride);
     return g_real_DrawPrimitiveUP(d, t, count, data, stride);
@@ -440,6 +484,9 @@ HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitiveUP(IDirect3DDevice9* d, D3DPRI
     RunDrawProbe();
     ++g_trace_draws;
     Trace(_AddressOfReturnAddress(), "DrawIndexedPrimitiveUP(type %d stride %u)", t, stride);
+    CaptureTriangles(d, t, count, data, stride, idx, fmt);
+    if (g_capture.skip_draw)
+        return D3D_OK;
     if (g_redirect.scaling && g_position_rhw && data)
         data = ScaledVertices(data, minv + numv, stride);
     return g_real_DrawIndexedPrimitiveUP(d, t, minv, numv, count, idx, fmt, data, stride);
@@ -448,13 +495,22 @@ HRESULT STDMETHODCALLTYPE HookDrawIndexedPrimitiveUP(IDirect3DDevice9* d, D3DPRI
 HRESULT STDMETHODCALLTYPE HookSetVertexDeclaration(IDirect3DDevice9* d, IDirect3DVertexDeclaration9* decl)
 {
     g_position_rhw = false;
+    g_uv_offset = g_color_offset = -1;
     if (decl) {
         D3DVERTEXELEMENT9 elems[MAXD3DDECLLENGTH + 1];
         UINT n = MAXD3DDECLLENGTH + 1;
         if (SUCCEEDED(decl->GetDeclaration(elems, &n))) {
-            for (UINT i = 0; i < n && elems[i].Stream != 0xff; ++i)
-                if (elems[i].Usage == D3DDECLUSAGE_POSITIONT && elems[i].Offset == 0)
+            for (UINT i = 0; i < n && elems[i].Stream != 0xff; ++i) {
+                const D3DVERTEXELEMENT9& e = elems[i];
+                if (e.Stream != 0)
+                    continue;
+                if (e.Usage == D3DDECLUSAGE_POSITIONT && e.Offset == 0)
                     g_position_rhw = true;
+                else if (e.Usage == D3DDECLUSAGE_TEXCOORD && e.UsageIndex == 0 && e.Type == D3DDECLTYPE_FLOAT2)
+                    g_uv_offset = e.Offset;
+                else if (e.Usage == D3DDECLUSAGE_COLOR && e.UsageIndex == 0 && e.Type == D3DDECLTYPE_D3DCOLOR)
+                    g_color_offset = e.Offset;
+            }
         }
     }
     return g_real_SetVertexDeclaration(d, decl);
@@ -464,6 +520,11 @@ HRESULT STDMETHODCALLTYPE HookSetFVF(IDirect3DDevice9* d, DWORD fvf)
 {
     Trace(_AddressOfReturnAddress(), "SetFVF(0x%x)", fvf);
     g_position_rhw = (fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
+    int offset = 16;  // XYZRHW
+    g_color_offset = (fvf & D3DFVF_DIFFUSE) ? offset : -1;
+    offset += (fvf & D3DFVF_DIFFUSE) ? 4 : 0;
+    offset += (fvf & D3DFVF_SPECULAR) ? 4 : 0;
+    g_uv_offset = (fvf & D3DFVF_TEXCOUNT_MASK) ? offset : -1;
     return g_real_SetFVF(d, fvf);
 }
 
@@ -581,6 +642,13 @@ void AppendExeCallers(char* line, size_t size, const void* stack_top, int max_fr
 void SetDrawProbe(void (*probe)())
 {
     g_draw_probe = probe;
+}
+
+DrawCapture SetDrawCapture(const DrawCapture& capture)
+{
+    DrawCapture previous = g_capture;
+    g_capture = capture;
+    return previous;
 }
 
 

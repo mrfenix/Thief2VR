@@ -195,6 +195,20 @@ void ControlsTab()
     }
 }
 
+// Settings that only apply to the game's own sword / blackjack arm, shown only
+// when the hands are off (with them on, the weapon sits in the hand).
+bool HiddenNow(const SettingInfo& s)
+{
+    static const char* const kArmOnly[] = {"grip_forward_ft", "grip_right_ft",    "grip_down_ft",
+                                           "weapon_pitch_deg", "weapon_yaw_deg", "weapon_roll_deg"};
+    if (!Config().show_hands)
+        return false;
+    for (const char* name : kArmOnly)
+        if (strcmp(s.name, name) == 0)
+            return true;
+    return false;
+}
+
 void BuildUi()
 {
     int count;
@@ -232,7 +246,7 @@ void BuildUi()
             if (controls)
                 ControlsTab();
             for (int i = 0; i < count; ++i) {
-                if (strcmp(settings[i].tab, tab) != 0)
+                if (strcmp(settings[i].tab, tab) != 0 || HiddenNow(settings[i]))
                     continue;
                 if (strcmp(settings[i].name, "refresh_rate") == 0)
                     RefreshRateWidget();

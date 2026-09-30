@@ -48,6 +48,8 @@
     <ClCompile Include="render\d3d9_hooks.cpp" />
     <ClCompile Include="render\device_hooks.cpp" />
     <ClCompile Include="render\frame_transfer.cpp" />
+    <ClCompile Include="render\hands.cpp" />
+    <ClCompile Include="render\game_models.cpp" />
     <ClCompile Include="vr.cpp" />
     <ClCompile Include="xr\xr_system.cpp" />
     <ClCompile Include="xr\xr_input.cpp" />
@@ -77,6 +79,9 @@
     <ClInclude Include="render\d3d9_hooks.h" />
     <ClInclude Include="render\device_hooks.h" />
     <ClInclude Include="render\frame_transfer.h" />
+    <ClInclude Include="render\hands.h" />
+    <ClInclude Include="render\game_models.h" />
+    <ClInclude Include="render\hand_model_data.h" />
     <ClInclude Include="vr.h" />
     <ClInclude Include="xr\xr_system.h" />
     <ClInclude Include="xr\xr_input.h" />

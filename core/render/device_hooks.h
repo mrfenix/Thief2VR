@@ -27,6 +27,24 @@ void FrameTraceOnPresent();
 // cancel. Used to inspect engine state in the middle of a specific draw.
 void SetDrawProbe(void (*probe)());
 
+// Draw capture: while a callback is set, every triangle of the engine's
+// pre-transformed draws (DrawPrimitiveUP / DrawIndexedPrimitiveUP; lists, strips
+// and fans) is passed to it, in canvas coordinates (before the redirect's
+// scaling). With skip_draw, the draws themselves (and clears) are dropped.
+struct CapturedVertex {
+    float x, y, z, rhw;
+    float u, v;           // 0 when the vertex has no texture coordinates
+    unsigned diffuse;     // 0xffffffff when the vertex has no colour
+};
+typedef void (*TriangleCallback)(const CapturedVertex tri[3], IDirect3DBaseTexture9* texture, void* user);
+struct DrawCapture {
+    TriangleCallback callback = nullptr;
+    void* user = nullptr;
+    bool skip_draw = false;
+};
+// Sets the capture and returns the previous one (to restore it afterwards).
+DrawCapture SetDrawCapture(const DrawCapture& capture);
+
 // Appends up to max_frames exe return addresses found on the stack above
 // stack_top to line (reverse-engineering aid).
 void AppendExeCallers(char* line, size_t size, const void* stack_top, int max_frames);

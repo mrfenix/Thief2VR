@@ -86,8 +86,16 @@ XrVector2f Deadzone(XrVector2f v, float dz)
 
 } // namespace
 
+XrControllerState g_last_state;
+
+const XrControllerState& ControlsLastState()
+{
+    return g_last_state;
+}
+
 void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
 {
+    g_last_state = c;
     const Settings& s = Config();
     const HeadState& head = CurrentHeadState();
 

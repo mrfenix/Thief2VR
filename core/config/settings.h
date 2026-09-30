@@ -28,6 +28,14 @@
     X(bool, aim_follows_head, true, 0, 1, "Movement", "Aim / frob follow the head (when not aiming by hand)")    \
     X(bool, aim_with_hand, true, 0, 1, "Hands", "Aim, frob and weapons follow the right hand")                  \
     X(bool, weapon_in_hand, true, 0, 1, "Hands", "Hold the weapon in your hand (off = in front of the view)")   \
+    X(bool, show_hands, true, 0, 1, "Hands", "Show both hands (the weapon in the right hand, no arm)")               \
+    X(float, hand_brightness, 1.0f, 0.2f, 2.0f, "Hands", "Hand brightness")                                          \
+    X(float, hand_forward_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: forward (cm)")                           \
+    X(float, hand_up_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: up (cm)")                                     \
+    X(float, hand_side_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: outward (cm)")                              \
+    X(float, hand_pitch_deg, 0.0f, -90.0f, 90.0f, "Hands", "Hand angle: pitch (deg)")                                \
+    X(float, hand_yaw_deg, 0.0f, -90.0f, 90.0f, "Hands", "Hand angle: yaw (deg)")                                    \
+    X(float, hand_roll_deg, 0.0f, -180.0f, 180.0f, "Hands", "Hand angle: roll (deg)")                                \
     X(bool, swing_to_attack, true, 0, 1, "Hands", "Swing the sword / blackjack to attack")                       \
     X(float, swing_speed, 2.5f, 1.0f, 6.0f, "Hands", "Swing speed needed to attack (m/s at the blade tip)")    \
     X(float, weapon_smoothing, 0.5f, 0.0f, 1.0f, "Hands", "Weapon smoothing (steadier when slow, 0 = off)")          \

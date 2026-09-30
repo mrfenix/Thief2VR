@@ -10,6 +10,7 @@
 #include "../xr/xr_input.h"
 #include "d3d9_hooks.h"
 #include "device_hooks.h"
+#include "hands.h"
 
 #include <cstring>
 
@@ -40,6 +41,7 @@ void* g_trampoline;  // MinHook's copy of the original scene render entry
 void* g_arm_trampoline;
 bool g_arm_override;   // set for the eye passes of this frame
 Mat3 g_arm_rg, g_arm_rh;
+hands::Hand g_hand[2];  // the visible hands this frame (left, right)
 Vec3 g_arm_pg, g_arm_ph;
 
 // Pinning: the attack animation moves the weapon away from the hand (wind-up
@@ -234,6 +236,13 @@ Mat3 g_weapon_d;
 Vec3 g_weapon_offset;
 ULONGLONG g_weapon_valid_until;  // GetTickCount64 deadline (stale when VR stops rendering)
 
+// With the visible hands, the weapon drawn in the hand (its frame: origin at
+// the grip, x to the tip), relative to the game camera.
+Mat3 g_drawn_weapon_r;
+Vec3 g_drawn_weapon_offset;
+float g_drawn_weapon_length = 1;  // the model's grip-to-tip length / the arm's (both arms' joints are ~3 ft)
+ULONGLONG g_drawn_weapon_until;
+
 void WeaponPointToHand(float* p)
 {
     int* cam = *Engine().current_camera;
@@ -248,6 +257,15 @@ void WeaponPointToHand(float* p)
     PinCorrection(cv, rg, false, rc, tc);
     Vec3 pinned = rc * Vec3{p[0], p[1], p[2]} + tc;
     Vec3 r = cv + g_weapon_offset + g_weapon_d * (pinned - cv);
+    if (GetTickCount64() <= g_drawn_weapon_until && g_have_idle) {
+        // Onto the weapon drawn in the hand: the point in the arm's weapon frame
+        // (origin the hand joint, x to the tip; the grip and tip line up with the
+        // sword model's), then out of the drawn weapon's frame.
+        Vec3 in_camera = Transpose(rg) * (pinned - cv);
+        Vec3 f = Transpose(g_idle_rel.r) * (in_camera - g_idle_rel.o);
+        f.x *= g_drawn_weapon_length;
+        r = cv + g_drawn_weapon_offset + g_drawn_weapon_r * f;
+    }
     p[0] = r.x;
     p[1] = r.y;
     p[2] = r.z;
@@ -283,6 +301,9 @@ void DumpArmContext()
     }
 }
 
+// Visible hands (render/hands.h): set per frame by OnSceneRender.
+bool g_hands_replace_arm;  // the hands and the game's weapon model are drawn instead of the game's arm
+
 void __cdecl ArmRenderDetour()
 {
     if (g_arm_dump_active) {
@@ -291,9 +312,19 @@ void __cdecl ArmRenderDetour()
         SetDrawProbe(nullptr);
         return;
     }
+    if (g_hands_replace_arm) {
+        // Not drawn (the hands show the weapon); only its lighting is read.
+        DrawCapture previous = SetDrawCapture(hands::ArmLightCapture());
+        reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
+        SetDrawCapture(previous);
+        return;
+    }
+    // The arm has its own depth range: keep it out of any depth sampling.
+    DrawCapture outer = SetDrawCapture(DrawCapture{});
     unsigned char* ctx = g_arm_override ? EngineRenderContext() : nullptr;
     if (!ctx) {
         reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
+        SetDrawCapture(outer);
         return;
     }
     float* block = reinterpret_cast<float*>(ctx + 0x44);
@@ -319,6 +350,7 @@ void __cdecl ArmRenderDetour()
     block[11] = o.z;
     reinterpret_cast<void(__cdecl*)()>(g_arm_trampoline)();
     memcpy(block, saved, sizeof(saved));
+    SetDrawCapture(outer);
 }
 
 bool g_recenter = true;
@@ -530,6 +562,50 @@ Mat3 EngineOrientation(const XrQuaternionf& q)
     return c * FromQuat(q.x, q.y, q.z, q.w) * Transpose(c);
 }
 
+// Tracking space (LOCAL, metres) -> engine world, the same mapping the eyes and
+// controllers use (TrackedPointToCameraOffset): world = b + a * p.
+void TrackedToWorld(float world_yaw, Vec3 camera, Mat3& a, Vec3& b)
+{
+    a = RotZ(world_yaw) * RotZ(-g_neutral_yaw) * XrToEngineBasis();
+    float scale = Config().world_scale;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            a.m[r][c] *= scale;
+    b = camera + RotZ(world_yaw) * g_last_head_offset - a * g_last_head;
+}
+
+Mat3 QuatMatrix(const XrQuaternionf& q)
+{
+    return FromQuat(q.x, q.y, q.z, q.w);
+}
+
+// A visible hand from its controller: the grip pose with the same smoothing as
+// the weapon (the aim orientation's smoothing carried over to the grip), and
+// finger curls from the grip / trigger / buttons.
+void FillHand(int side, const XrPosef& grip_raw, const XrPosef& aim_raw, const XrPosef& grip_smooth,
+              const XrPosef& aim_smooth, const Mat3& a, Vec3 b, bool holding_weapon)
+{
+    hands::Hand& h = g_hand[side];
+    h.visible = true;
+    h.grip_rot = QuatMatrix(aim_smooth.orientation) * Transpose(QuatMatrix(aim_raw.orientation)) *
+                 QuatMatrix(grip_raw.orientation);
+    h.grip_pos = {grip_smooth.position.x, grip_smooth.position.y, grip_smooth.position.z};
+    h.a = a;
+    h.b = b;
+    // Grip curls the hand into a fist; the trigger points it (index straight,
+    // the other fingers and the thumb curled); a face button tucks the thumb.
+    const XrControllerState& c = ControlsLastState();
+    float grip = c.grip[side], point = c.trigger[side];
+    bool thumb = side == 1 ? (c.a || c.b || c.stick_click[1]) : (c.x || c.y || c.stick_click[0] || c.menu);
+    const float relaxed = 0.25f;
+    float fist = std::fmax(relaxed, grip);
+    h.index = std::fmax(relaxed, grip) * (1.0f - point);
+    h.middle = h.ring = h.pinky = std::fmax(fist, point);
+    h.thumb = std::fmax(thumb ? 1.0f : 0.3f, point * 0.8f);
+    if (holding_weapon)
+        h.index = h.middle = h.ring = h.pinky = h.thumb = 1.0f;
+}
+
 void __cdecl OnSceneRender(EnginePosition* pos, double focal)
 {
     static bool logged;
@@ -706,8 +782,10 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     const bool bow = EngineLimbMode() == 1;
     const bool bow_left = bow && Config().bow_two_handed;
     g_arm_override = false;
+    g_hand[0].visible = g_hand[1].visible = false;
     if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam &&
         XrControls().LocateHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose)) {
+        const XrPosef grip_raw = grip_pose, aim_raw = aim_pose;
         SmoothHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose);
         const float* cam_pos = reinterpret_cast<const float*>(cam + 2);
         const uint16_t* cam_ang = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
@@ -747,6 +825,21 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         g_arm_ph = g_arm_pg + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
         g_arm_override = true;
         PinCorrection(g_arm_pg, g_arm_rg, true, g_pin_rc, g_pin_tc);
+
+        // The visible hands (not with the bow: the game's bow arm shows).
+        if (Config().show_hands && !bow) {
+            Mat3 tw_a;
+            Vec3 tw_b;
+            TrackedToWorld(yaw, g_arm_pg, tw_a, tw_b);
+            bool weapon_out = EngineLimbMode() == 2 && hands::WeaponModelsLoaded();
+            FillHand(1, grip_raw, aim_raw, grip_pose, aim_pose, tw_a, tw_b, weapon_out);
+            XrPosef left_grip, left_aim;
+            if (XrControls().LocateHand(0, frame->display_time, left_grip, left_aim)) {
+                const XrPosef left_grip_raw = left_grip, left_aim_raw = left_aim;
+                SmoothHand(0, frame->display_time, left_grip, left_aim);
+                FillHand(0, left_grip_raw, left_aim_raw, left_grip, left_aim, tw_a, tw_b, false);
+            }
+        }
         g_weapon_d = g_arm_rh * Transpose(g_arm_rg);
         g_weapon_offset = g_arm_ph - g_arm_pg;
         g_weapon_valid_until = GetTickCount64() + 250;
@@ -760,6 +853,39 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         Log("ArmDump: ---- frame dump (arm drawn unmodified) ----");
         EngineLogPlayerPhysics();
         EngineLogArmWeapon();
+    }
+
+    // Visible hands this frame: for empty hands and the sword / blackjack (the
+    // bow and a carried body keep the game's arm). Until the hands are ready
+    // (a fist captured, the engine's depth mapping known) the game's arm shows.
+    const int limb = EngineLimbMode();
+    const bool hands_on = Config().show_hands && g_arm_override && g_head.camera_mode == 0 &&
+                          (limb == 0xff || limb == 0 || limb == 2);
+    {
+        // A different arm / weapon: find out again which weapon it holds.
+        static int last_arm = -1, last_limb = -1;
+        int arm = EngineArmObject();
+        hands::SetWeaponObject(limb == 2 ? EngineCurrentWeapon() : 0);
+        if (arm != last_arm || limb != last_limb)
+            hands::ResetArmWeapon();
+        last_arm = arm;
+        last_limb = limb;
+    }
+    g_hands_replace_arm = hands_on && limb == 2 && hands::Ready() && hands::WeaponModelsLoaded();
+    // The weapon model in the right hand (at the controller's grip); the melee
+    // hit spheres are moved onto it (WeaponPointToHand).
+    hands::WeaponPose weapon_pose;
+    g_drawn_weapon_until = 0;
+    if (g_hands_replace_arm && g_hand[1].visible) {
+        weapon_pose.kind = hands::ArmWeapon();
+        hands::WeaponFrame(g_hand[1], Config().world_scale, weapon_pose.r, weapon_pose.p);
+        if (weapon_pose.kind != hands::Weapon::None) {
+            g_drawn_weapon_r = weapon_pose.r;
+            g_drawn_weapon_offset = weapon_pose.p - g_arm_pg;
+            // Sword: grip to tip 2.99 ft, like the arm; blackjack: 1.58 ft.
+            g_drawn_weapon_length = weapon_pose.kind == hands::Weapon::Blackjack ? 1.58f / 2.98f : 1.0f;
+            g_drawn_weapon_until = GetTickCount64() + 250;
+        }
     }
 
     XrPosef poses[2];
@@ -789,10 +915,25 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         *pos = p;
         g_dump_eye = p;
 
+        Mat3 engine_eye_rot = RotZ(Angle16ToRad(p.heading)) * RotY(Angle16ToRad(p.pitch)) *
+                              RotX(Angle16ToRad(p.bank));
+        const bool depth_sample = eye == 0 && hands_on && hands::NeedDepthSample();
+        DrawCapture before_depth;
+        if (depth_sample)
+            before_depth = SetDrawCapture(hands::DepthSampleCapture());
+
         IDirect3DSurface9* target = g_eye_msaa ? g_eye_msaa_color[eye] : g_eyes.color[eye];
         BeginSceneRedirect(dev, target, g_eye_depth);
         CallOriginal(pos, eye_focal);
         EndSceneRedirect(dev);
+        if (depth_sample) {
+            SetDrawCapture(before_depth);
+            hands::EndDepthSample();
+        }
+        if (hands_on) {
+            hands::Eye he{engine_eye_rot, {p.x, p.y, p.z}, (eye_h * 0.5f) / tan_v, eye_w * 0.5f, eye_h * 0.5f};
+            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, Config().hand_brightness);
+        }
         if (g_eye_msaa)
             dev->StretchRect(target, nullptr, g_eyes.color[eye], nullptr, D3DTEXF_NONE);  // resolve
     }
@@ -854,6 +995,7 @@ void StereoOnDeviceReset()
     }
     g_eye_msaa = 0;
     ReleaseGpuQueries();
+    hands::OnDeviceReset();
     g_eyes.width = g_eyes.height = 0;
 }
 

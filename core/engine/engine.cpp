@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <MinHook.h>
+#include <intrin.h>
 #include <cstring>
 
 static void* g_camera_update_trampoline;
@@ -594,6 +595,74 @@ unsigned char* g_weapon_on_fn;     // FUN_0055aab0
 unsigned char* g_weapon_off_fn;    // FUN_0055ab00
 int g_strike_arm, g_strike_weapon;  // the open window, or 0
 
+// The attack ends when the swing motion does: FUN_0046bca0 (cdecl(a, b), the
+// motion's end callback, also called when the weapon is put away from
+// FUN_0046c3a0) switches the hits off, sends EndAttack and clears f94/f98.
+// With the swing starting at once, the motion can end before the swing reaches
+// its target, so while the VR hit window is open the end waits for it to close
+// (EngineMeleeStrike(false)). Putting the weapon away still ends it at once.
+void* g_end_attack_tramp;
+bool g_end_attack_pending;
+int g_end_attack_args[2];
+
+void __cdecl EndAttackDetour(int a, int b)
+{
+    void* from = _ReturnAddress();
+    if (g_vr_melee && g_strike_weapon && from != g_base + 0x6c3b8) {  // not from FUN_0046c3a0
+        g_end_attack_pending = true;
+        g_end_attack_args[0] = a;
+        g_end_attack_args[1] = b;
+        return;
+    }
+    g_end_attack_pending = false;
+    reinterpret_cast<void(__cdecl*)(int, int)>(g_end_attack_tramp)(a, b);
+}
+
+// The swing starts at once: the release (FUN_0046ca90) requests the swing
+// motion with FUN_0054c830, which only starts it if the arm isn't busy
+// (motion controller DAT_00aa1410[6] -> vtbl 0x30(arm[2]) == 0); otherwise it
+// waits for the wind-up motion to finish. Starting a motion enters the arm's
+// state, which plays its sound ("Event Motion" + the state's tags, in
+// FUN_0054bf40): the swing sound came ~0.5 s after the swing. With VR melee
+// and a sword / blackjack out, the swing always starts at once, as in the
+// not-busy case: stop the current motion ((*arm[0])->vtbl 0x24(0)), then
+// FUN_0054c780 (ESI = the arm state) starts the requested one.
+void* g_swing_request_tramp;
+
+__declspec(naked) void __cdecl CallWithEsi(void* /*fn*/, void* /*esi*/)
+{
+    __asm {
+        push esi
+        push ebx
+        push edi
+        push ebp
+        mov esi, [esp + 24]
+        call dword ptr [esp + 20]
+        pop ebp
+        pop edi
+        pop ebx
+        pop esi
+        ret
+    }
+}
+
+void __cdecl SwingRequestDetour()
+{
+    int* arm = *reinterpret_cast<int**>(g_base + 0x6a1410);  // DAT_00aa1410
+    int limb = *reinterpret_cast<int*>(g_base + 0x4717f8);   // DAT_008717f8
+    if (!g_vr_melee || limb != 2 || !arm || !arm[6]) {
+        reinterpret_cast<void(__cdecl*)()>(g_swing_request_tramp)();
+        return;
+    }
+    arm[4] = 2;     // the swing
+    arm[5] = 0xff;
+    if (void* current = reinterpret_cast<void*>(arm[0])) {
+        auto stop = reinterpret_cast<void(__thiscall*)(void*, int)>((*reinterpret_cast<void***>(current))[0x24 / 4]);
+        stop(current, 0);
+    }
+    CallWithEsi(g_base + 0x14c780, arm);  // FUN_0054c780
+}
+
 int __cdecl AnimHitsOnDetour(int creature_obj)
 {
     if (g_vr_melee)
@@ -886,6 +955,10 @@ bool EngineMeleeStrike(bool open)
         if (g_strike_weapon)
             CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
         g_strike_arm = g_strike_weapon = 0;
+        if (g_end_attack_pending && g_end_attack_tramp) {
+            g_end_attack_pending = false;
+            reinterpret_cast<void(__cdecl*)(int, int)>(g_end_attack_tramp)(g_end_attack_args[0], g_end_attack_args[1]);
+        }
         g_melee_until = GetTickCount64() + 300;  // late hit reports still count
         return true;
     }
@@ -948,6 +1021,33 @@ static void InstallWeaponHooks()
     if (st != MH_OK)
         g_anim_hits_on_trampoline = g_anim_hits_off_trampoline = nullptr;
     Log("Engine: melee timing hooks %s", MH_StatusToString(st));
+
+    unsigned char* end_attack = g_base + 0x6bca0;  // FUN_0046bca0
+    if (st == MH_OK &&
+        Matches(end_attack, "a1 ?? ?? ?? ?? 85 c0 74 05 8b 40 04 eb 02 33 c0 68 ?? ?? ?? ?? 68 00 20 00 00 50 e8") &&
+        Matches(g_base + 0x6c3b3, "e8 ?? ?? ?? ?? 83 c4 08")) {
+        MH_STATUS es = MH_CreateHook(end_attack, reinterpret_cast<void*>(&EndAttackDetour), &g_end_attack_tramp);
+        if (es == MH_OK)
+            es = MH_EnableHook(end_attack);
+        if (es != MH_OK)
+            g_end_attack_tramp = nullptr;
+        Log("Engine: attack end hook %s", MH_StatusToString(es));
+    } else {
+        Log("Engine: attack end signature mismatch; the swing motion ends the hit window");
+    }
+
+    unsigned char* swing_request = g_base + 0x14c830;  // FUN_0054c830
+    if (st == MH_OK && Matches(swing_request, "a1 ?? ?? ?? ?? 8b 48 18 56 8b f0 c7 40 10 02 00 00 00 c7 40 14 ff 00 00 00") &&
+        Matches(g_base + 0x14c780, "8b 46 0c 8b 56 14 53 57 8b 7e 10 85 c0")) {
+        MH_STATUS ss = MH_CreateHook(swing_request, reinterpret_cast<void*>(&SwingRequestDetour), &g_swing_request_tramp);
+        if (ss == MH_OK)
+            ss = MH_EnableHook(swing_request);
+        if (ss != MH_OK)
+            g_swing_request_tramp = nullptr;
+        Log("Engine: swing start hook %s", MH_StatusToString(ss));
+    } else {
+        Log("Engine: swing start signature mismatch; swings wait for the wind-up animation");
+    }
 }
 
 void EngineSetWeaponPointTransform(WeaponPointTransform transform)
@@ -994,6 +1094,13 @@ bool EngineArmJoints(float out[][3], int count)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+int EngineCurrentWeapon()
+{
+    if (!g_cur_weapon_fn || !g_player_object || !*g_player_object || EngineLimbMode() != 2)
+        return 0;
+    return CallCurWeapon(*g_player_object);
 }
 
 bool EngineMeleeBusy()

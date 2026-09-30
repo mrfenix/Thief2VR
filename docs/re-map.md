@@ -102,6 +102,9 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
   - `FUN_0046bca0` ends the attack (motion finished): hits off, CurWpnDmg, then EndAttack and resetting `f94`/`f98`.
   - In a quick swing the hits switch on about 0.54 s after the press, when the swing animation reaches flag 0x1000.
   - Arm motion requests: `DAT_00aa1410[4]` = 1 wind-up (`[5]` = type), 2 swing, 3 idle, applied by `FUN_0054c780`.
+  - A request (e.g. the swing, `FUN_0054c830`) starts at once only if the motion controller (`[6]`, vtbl 0x30(`[2]`)) isn't busy: it then stops the current motion (`(*[0])->vtbl 0x24(0)`) and calls `FUN_0054c780` (ESI = the arm state). Otherwise it waits for the current motion (the wind-up) to finish.
+  - **Swing sound:** entering an arm state (`FUN_0054bf40`) plays "Event Motion" plus the state's tags (e.g. `PlyrSword 1, PlyrSwordSwing 1, Direction 1`) through the tag sound player `FUN_005738d0(tags, arm, weapon, params)`, so the swing sound comes when the swing motion starts. (`FUN_0057e290` "Event WeaponSwing" is the AI creatures' motion-flag swing sound, not the player's.)
+  - In testing, the OpenAL function pointers resolved by `FUN_006aa0c0` (e.g. `alSourcePlay` at `DAT_00a9d598`, the module at `DAT_00a9d588`) read null at runtime, so sound-level tracing has to happen above the driver (e.g. at `FUN_005738d0`).
 - **Hit spheres:** `FUN_0055fcd0` (a creature method, `__thiscall(creature, weapon, weapon index)`, RET 8) runs each frame while the weapon has physics.
   - The spheres come from the creature type's weapon table: `DAT_00aa1554[creature+0x38] + 0x3c`, then `[index]` = {count, entries of 5 dwords: joint A, joint B, t, radius, ?}.
   - Each sphere is placed at `lerp(joint A, joint B, t)` of the joints (world space, `creature+0x19c`) by `FUN_00537270` (cdecl(obj, sphere), point in EDI).
@@ -116,6 +119,8 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - **Thief2VR:**
   - The spheres get the same move into the hand as the drawn arm.
   - With VR melee on, the 0x1000/0x2000 callbacks are ignored. The swing opens the hit window right after its quick attack is released (`f94` set) and closes it when the hand slows.
+  - With VR melee on and a sword / blackjack out, the swing request always starts the swing motion at once (as in the not-busy case), so the swing sound plays as the player swings.
+  - The attack end (`FUN_0046bca0`, cdecl(a, b): the swing motion's end callback, installed by `FUN_0046c230`; also called when the weapon is put away from `FUN_0046c3a0`) is held back while the VR hit window is open and run when it closes, so a short swing motion doesn't switch the hits off mid-swing.
   - The weapon is pinned to a recorded rest pose (joint frame 2-3-4 relative to the game camera), so the arm animation doesn't show.
 
 ### Bow arm

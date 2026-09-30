@@ -25,3 +25,6 @@ bool ControlsBowDrawing();
 
 // True while the game's lean is held (physical lean).
 bool ControlsLeaning();
+
+// The controller state of the last ControlsUpdate (e.g. for finger poses).
+const XrControllerState& ControlsLastState();
