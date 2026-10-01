@@ -32,6 +32,9 @@ struct Model {
 // looked up by the materials' names in the archive's txt16 / txt folders.
 bool Load(const char* name, Model& out);
 
+// Decodes an image file in memory (PNG, GIF, ...) into A8R8G8B8 pixels.
+bool DecodeImage(const void* data, size_t size, Texture& out);
+
 // The texture coordinates of a creature mesh's vertices (LGMM, e.g. the
 // first-person arms "ARMSW2.BIN" / "BJACHAND.BIN") from RES\mesh.crf.
 struct Uv {

@@ -45,13 +45,13 @@
     X(float, weapon_pitch_deg, 0.37f, -90.0f, 90.0f, "Hands", "Weapon angle: pitch (deg)")                        \
     X(float, weapon_yaw_deg, 0.0f, -90.0f, 90.0f, "Hands", "Weapon angle: yaw (deg)")                            \
     X(float, weapon_roll_deg, 24.44f, -180.0f, 180.0f, "Hands", "Weapon angle: roll (deg)")                            \
-    X(bool, bow_two_handed, false, 0, 1, "Hands", "Two-handed bow: bow in the left hand, draw with the right grip")  \
-    X(float, bow_forward_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position: forward (ft)")                               \
-    X(float, bow_right_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position: right (ft)")                                   \
-    X(float, bow_down_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position: down (ft)")                                     \
-    X(float, bow_pitch_deg, 0.0f, -90.0f, 90.0f, "Hands", "Bow angle: pitch (deg)")                                  \
-    X(float, bow_yaw_deg, 0.74f, -90.0f, 90.0f, "Hands", "Bow angle: yaw (deg)")                                      \
-    X(float, bow_roll_deg, -0.74f, -180.0f, 180.0f, "Hands", "Bow angle: roll (deg)")                                  \
+    X(bool, bow_two_handed, true, 0, 1, "Hands", "Two-handed bow: bow in the left hand, draw the string with the right grip") \
+    X(float, bow_forward_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position in the hand: forward (ft)")                   \
+    X(float, bow_right_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position in the hand: right (ft)")                       \
+    X(float, bow_down_ft, 0.0f, -2.0f, 2.0f, "Hands", "Bow position in the hand: down (ft)")                         \
+    X(float, bow_pitch_deg, 0.0f, -90.0f, 90.0f, "Hands", "Bow angle in the hand: pitch (deg)")                      \
+    X(float, bow_yaw_deg, 0.74f, -90.0f, 90.0f, "Hands", "Bow angle in the hand: yaw (deg)")                         \
+    X(float, bow_roll_deg, -0.74f, -180.0f, 180.0f, "Hands", "Bow angle in the hand: roll (deg)")                    \
     X(bool, physical_crouch, true, 0, 1, "Movement", "Crouch by physically crouching")                          \
     X(float, physical_crouch_ft, 1.0f, 0.3f, 3.0f, "Movement", "Physical crouch depth (ft)")                    \
     X(bool, physical_lean, true, 0, 1, "Movement", "Lean by physically leaning")                                \

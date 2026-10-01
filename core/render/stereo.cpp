@@ -257,14 +257,18 @@ void WeaponPointToHand(float* p)
     PinCorrection(cv, rg, false, rc, tc);
     Vec3 pinned = rc * Vec3{p[0], p[1], p[2]} + tc;
     Vec3 r = cv + g_weapon_offset + g_weapon_d * (pinned - cv);
-    if (GetTickCount64() <= g_drawn_weapon_until && g_have_idle) {
-        // Onto the weapon drawn in the hand: the point in the arm's weapon frame
-        // (origin the hand joint, x to the tip; the grip and tip line up with the
-        // sword model's), then out of the drawn weapon's frame.
-        Vec3 in_camera = Transpose(rg) * (pinned - cv);
-        Vec3 f = Transpose(g_idle_rel.r) * (in_camera - g_idle_rel.o);
-        f.x *= g_drawn_weapon_length;
-        r = cv + g_drawn_weapon_offset + g_drawn_weapon_r * f;
+    float j[5][3];
+    if (GetTickCount64() <= g_drawn_weapon_until && EngineArmJoints(j, 5)) {
+        // Onto the weapon drawn in the hand. The engine puts each hit sphere on
+        // the line from the arm's hand joint (3) to its weapon tip (4): the same
+        // fraction of the way along the drawn weapon, from its grip (sword 2.99
+        // ft, like the arm; the blackjack shorter).
+        Vec3 hand{j[3][0], j[3][1], j[3][2]}, tip{j[4][0], j[4][1], j[4][2]};
+        Vec3 along = tip - hand;
+        float len2 = Dot(along, along);
+        float t = len2 > 1e-6f ? Dot(Vec3{p[0], p[1], p[2]} - hand, along) / len2 : 0.0f;
+        const float kArmHandToTip = 2.99f;
+        r = cv + g_drawn_weapon_offset + g_drawn_weapon_r * Vec3{t * kArmHandToTip * g_drawn_weapon_length, 0, 0};
     }
     p[0] = r.x;
     p[1] = r.y;
@@ -606,6 +610,114 @@ void FillHand(int side, const XrPosef& grip_raw, const XrPosef& aim_raw, const X
         h.index = h.middle = h.ring = h.pinky = h.thumb = 1.0f;
 }
 
+// --- The bow ---
+// Where the bow is (in the bow hand, or the game's bow pinned there), how far
+// it's drawn, the nocked arrow, and where that arrow would leave from; handed
+// to the engine for the shot (EngineSetBowShot). At a release the drawn shot is
+// kept a moment, so the game's fire (on the release) uses it.
+Vec3 g_bow_aim_rel;          // the arrow's direction relative to the view's world yaw
+ULONGLONG g_bow_aim_until;   // StereoBowAim is valid until then
+ULONGLONG g_bow_drawn_until; // the last drawn shot is kept until then
+Vec3 g_bow_shot_offset, g_bow_shot_dir;
+
+bool UpdateBow(int bow_hand, bool two_handed, const Mat3& tw_a, Vec3 tw_b, const XrPosef sm_grip[2],
+               const bool located[2], const XrPosef& bow_grip, hands::BowPose& pose)
+{
+    const Settings& cfg = Config();
+    const bool drawn_hands = cfg.show_hands && two_handed;
+    hands::BowInput in;
+    if (drawn_hands) {
+        // In the fist, adjusted by the Bow angle / position sliders.
+        const float deg = kPi / 180.0f;
+        Mat3 adjust = RotZ(cfg.bow_yaw_deg * deg) * RotY(cfg.bow_pitch_deg * deg) * RotX(cfg.bow_roll_deg * deg);
+        in.r = hands::BowFrameInHand(g_hand[bow_hand], cfg.world_scale) * adjust;
+        in.grip = tw_b + tw_a * g_hand[bow_hand].grip_pos + in.r * Vec3{cfg.bow_forward_ft, -cfg.bow_right_ft, -cfg.bow_down_ft};
+    } else {
+        // Pointing along the hand (one-handed), or the game's pinned bow (hands off).
+        in.r = g_arm_rh;
+        in.grip = tw_b + tw_a * ToVec(bow_grip.position);
+    }
+    in.left_hand = bow_hand == 0;
+    in.pulled = two_handed && ControlsBowDrawing() && located[1];
+    in.string_hand = tw_b + tw_a * ToVec(sm_grip[1].position);
+    double held = ControlsBowDrawSeconds();
+    if (!two_handed && held >= 0)
+        in.auto_draw = (float)min(1.0, held / 0.8);  // drawn in 0.8 s
+
+    // The arrow's model, looked up once per arrow: the nocked arrow (the game
+    // makes it as the draw starts), or before that the selected arrows (the
+    // current weapon with the bow out).
+    static int named = 0;
+    static char file[48];
+    int nocked = EngineNockedArrow();
+    int arrow = nocked ? nocked : EngineCurrentWeapon();
+    if (arrow != named) {
+        named = arrow;
+        file[0] = 0;
+        char name[32];
+        const char* what = nocked ? "nocked" : "selected";
+        auto is_arrow = [](const char* n) {  // arrow model names all contain "arr"
+            for (; n[0] && n[1] && n[2]; ++n)
+                if (_strnicmp(n, "arr", 3) == 0)
+                    return true;
+            return false;
+        };
+        if (arrow && EngineObjectModelName(arrow, name, sizeof(name)) && is_arrow(name)) {
+            snprintf(file, sizeof(file), "%s.bin", name);
+            Log("Bow: %s arrow %d, model %s", what, arrow, name);
+        } else if (arrow) {
+            snprintf(file, sizeof(file), "arrow.bin");  // the broadhead
+            Log("Bow: %s arrow %d, no arrow model (showing a broadhead)", what, arrow);
+        }
+    }
+    in.arrow = file[0] ? file : nullptr;
+
+    Vec3 centre, dir;
+    if (!hands::MakeBow(in, pose, centre, dir))
+        return false;
+    pose.visible = cfg.show_hands;
+    if (cfg.show_hands && in.pulled) {
+        // The drawing hand hooks the string.
+        hands::Hand& s = g_hand[1];
+        s.thumb = 0.6f;
+        s.index = s.middle = s.ring = 0.55f;
+        s.pinky = 0.8f;
+    } else if (cfg.show_hands && two_handed && in.arrow && g_hand[1].visible) {
+        // Not on the string yet: the arrow is in the drawing hand, as if just
+        // taken from the quiver - through the fist, out of the thumb end, the
+        // nock just behind the hand.
+        hands::Hand& s = g_hand[1];
+        Vec3 fist;
+        hands::WeaponFrame(s, cfg.world_scale, pose.hand_r, fist);
+        pose.hand_nock = fist - pose.hand_r * Vec3{0.3f, 0, 0};
+        pose.arrow_in_hand = true;
+        s.index = s.middle = 0.8f;
+        s.ring = s.pinky = 0.9f;
+        s.thumb = 0.8f;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    const bool drawing = in.pulled || in.auto_draw >= 0;
+    if (drawing || now > g_bow_drawn_until) {
+        g_bow_shot_offset = centre - g_arm_pg;
+        g_bow_shot_dir = dir;
+        if (drawing)
+            g_bow_drawn_until = now + 300;
+    }
+    const float offset[3] = {g_bow_shot_offset.x, g_bow_shot_offset.y, g_bow_shot_offset.z};
+    const float d[3] = {g_bow_shot_dir.x, g_bow_shot_dir.y, g_bow_shot_dir.z};
+    EngineSetBowShot(true, offset, d);
+    // It aims the body while drawing (and a moment after), or held one-handed.
+    if (drawing || now <= g_bow_drawn_until || !two_handed) {
+        float world_yaw = 0;
+        if (EngineWorldYaw(world_yaw)) {
+            g_bow_aim_rel = RotZ(-world_yaw) * g_bow_shot_dir;
+            g_bow_aim_until = now + 100;
+        }
+    }
+    return true;
+}
+
 void __cdecl OnSceneRender(EnginePosition* pos, double focal)
 {
     static bool logged;
@@ -781,12 +893,25 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     int* cam = *Engine().current_camera;
     const bool bow = EngineLimbMode() == 1;
     const bool bow_left = bow && Config().bow_two_handed;
+    const int main_hand = bow_left ? 0 : 1;  // the weapon / bow hand
     g_arm_override = false;
     g_hand[0].visible = g_hand[1].visible = false;
-    if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam &&
-        XrControls().LocateHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose)) {
-        const XrPosef grip_raw = grip_pose, aim_raw = aim_pose;
-        SmoothHand(bow_left ? 0 : 1, frame->display_time, grip_pose, aim_pose);
+    // Both controllers, located and smoothed once this frame.
+    XrPosef raw_grip[2], raw_aim[2], sm_grip[2], sm_aim[2];
+    bool located[2];
+    for (int h = 0; h < 2; ++h) {
+        located[h] = XrControls().LocateHand(h, frame->display_time, raw_grip[h], raw_aim[h]);
+        sm_grip[h] = raw_grip[h];
+        sm_aim[h] = raw_aim[h];
+        if (located[h])
+            SmoothHand(h, frame->display_time, sm_grip[h], sm_aim[h]);
+    }
+    hands::BowPose bow_pose;
+    bool bow_shot = false;
+    if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam && located[main_hand]) {
+        grip_pose = sm_grip[main_hand];
+        aim_pose = sm_aim[main_hand];
+        const XrPosef grip_raw = raw_grip[main_hand], aim_raw = raw_aim[main_hand];
         const float* cam_pos = reinterpret_cast<const float*>(cam + 2);
         const uint16_t* cam_ang = reinterpret_cast<const uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
         g_arm_rg = RotZ(Angle16ToRad(cam_ang[2])) * RotY(Angle16ToRad(cam_ang[1])) * RotX(Angle16ToRad(cam_ang[0]));
@@ -802,14 +927,11 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         g_arm_rh = world_yaw * unyaw * EngineOrientation(aim_pose.orientation) * adjust;
         // Drawing the two-handed bow: it pivots on the bow hand to lie along the
         // arrow line (string hand -> bow hand), the line the arrow flies along.
-        XrPosef string_grip, string_aim;
-        if (bow_left && ControlsBowDrawing() &&
-            XrControls().LocateHand(1, frame->display_time, string_grip, string_aim)) {
-            SmoothHand(1, frame->display_time, string_grip, string_aim);
+        if (bow_left && ControlsBowDrawing() && located[1]) {
             Mat3 to_world = world_yaw * unyaw * XrToEngineBasis();
             Vec3 forward = g_arm_rh * Vec3{1, 0, 0};
             Vec3 line = BowArrowLine(forward, to_world * ToVec(grip_pose.position),
-                                     to_world * ToVec(string_grip.position));
+                                     to_world * ToVec(sm_grip[1].position));
             g_arm_rh = RotationBetween(forward, line) * g_arm_rh;
         }
         // Place H so the arm's usual grip point (in view: forward/right/down)
@@ -822,24 +944,27 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         Vec3 grip_in_view{cfg.grip_forward_ft, -cfg.grip_right_ft, -cfg.grip_down_ft};
         if (bow)
             grip_in_view = BowAimPose().o + Vec3{cfg.bow_forward_ft, -cfg.bow_right_ft, -cfg.bow_down_ft};
-        g_arm_ph = g_arm_pg + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
+        // Relative to where the eyes start: the game camera, less the game's
+        // lean slide when "Lean adds the game's camera shift" is off (eye_base),
+        // so the hands and weapons stay with the view.
+        const Vec3 view_base = g_arm_pg + Vec3{eye_base.x - body.x, eye_base.y - body.y, eye_base.z - body.z};
+        g_arm_ph = view_base + Vec3{hand[0], hand[1], hand[2]} - g_arm_rh * grip_in_view;
         g_arm_override = true;
         PinCorrection(g_arm_pg, g_arm_rg, true, g_pin_rc, g_pin_tc);
 
-        // The visible hands (not with the bow: the game's bow arm shows).
-        if (Config().show_hands && !bow) {
-            Mat3 tw_a;
-            Vec3 tw_b;
-            TrackedToWorld(yaw, g_arm_pg, tw_a, tw_b);
-            bool weapon_out = EngineLimbMode() == 2 && hands::WeaponModelsLoaded();
-            FillHand(1, grip_raw, aim_raw, grip_pose, aim_pose, tw_a, tw_b, weapon_out);
-            XrPosef left_grip, left_aim;
-            if (XrControls().LocateHand(0, frame->display_time, left_grip, left_aim)) {
-                const XrPosef left_grip_raw = left_grip, left_aim_raw = left_aim;
-                SmoothHand(0, frame->display_time, left_grip, left_aim);
-                FillHand(0, left_grip_raw, left_aim_raw, left_grip, left_aim, tw_a, tw_b, false);
-            }
+        // The visible hands: the weapon / bow hand, and the other one.
+        Mat3 tw_a;
+        Vec3 tw_b;
+        TrackedToWorld(yaw, view_base, tw_a, tw_b);
+        if (Config().show_hands) {
+            bool holding = (EngineLimbMode() == 2 && hands::WeaponModelsLoaded()) || bow;
+            FillHand(main_hand, grip_raw, aim_raw, grip_pose, aim_pose, tw_a, tw_b, holding);
+            int other = 1 - main_hand;
+            if (located[other])
+                FillHand(other, raw_grip[other], raw_aim[other], sm_grip[other], sm_aim[other], tw_a, tw_b, false);
         }
+        if (bow)
+            bow_shot = UpdateBow(main_hand, bow_left, tw_a, tw_b, sm_grip, located, grip_pose, bow_pose);
         g_weapon_d = g_arm_rh * Transpose(g_arm_rg);
         g_weapon_offset = g_arm_ph - g_arm_pg;
         g_weapon_valid_until = GetTickCount64() + 250;
@@ -860,7 +985,9 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     // (a fist captured, the engine's depth mapping known) the game's arm shows.
     const int limb = EngineLimbMode();
     const bool hands_on = Config().show_hands && g_arm_override && g_head.camera_mode == 0 &&
-                          (limb == 0xff || limb == 0 || limb == 2);
+                          (limb == 0xff || limb == 0 || limb == 1 || limb == 2);
+    if (!bow_shot)
+        EngineSetBowShot(false, nullptr, nullptr);
     {
         // A different arm / weapon: find out again which weapon it holds.
         static int last_arm = -1, last_limb = -1;
@@ -871,12 +998,13 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         last_arm = arm;
         last_limb = limb;
     }
-    g_hands_replace_arm = hands_on && limb == 2 && hands::Ready() && hands::WeaponModelsLoaded();
+    g_hands_replace_arm = hands_on && hands::Ready() &&
+                          ((limb == 2 && hands::WeaponModelsLoaded()) || (limb == 1 && bow_pose.visible));
     // The weapon model in the right hand (at the controller's grip); the melee
     // hit spheres are moved onto it (WeaponPointToHand).
     hands::WeaponPose weapon_pose;
     g_drawn_weapon_until = 0;
-    if (g_hands_replace_arm && g_hand[1].visible) {
+    if (g_hands_replace_arm && limb == 2 && g_hand[1].visible) {
         weapon_pose.kind = hands::ArmWeapon();
         hands::WeaponFrame(g_hand[1], Config().world_scale, weapon_pose.r, weapon_pose.p);
         if (weapon_pose.kind != hands::Weapon::None) {
@@ -932,7 +1060,8 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         }
         if (hands_on) {
             hands::Eye he{engine_eye_rot, {p.x, p.y, p.z}, (eye_h * 0.5f) / tan_v, eye_w * 0.5f, eye_h * 0.5f};
-            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, Config().hand_brightness);
+            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, bow_pose,
+                        Config().hand_brightness);
         }
         if (g_eye_msaa)
             dev->StretchRect(target, nullptr, g_eyes.color[eye], nullptr, D3DTEXF_NONE);  // resolve
@@ -1036,6 +1165,16 @@ bool TrackedDirectionAngles(const XrVector3f& direction, float& heading, float& 
         return false;
     heading = std::atan2(v.y, v.x);
     pitch = std::asin(-v.z / len);  // positive = down
+    return true;
+}
+
+bool StereoBowAim(float& heading, float& pitch)
+{
+    if (GetTickCount64() > g_bow_aim_until || Length(g_bow_aim_rel) < 1e-4f)
+        return false;
+    Vec3 v = Normalize(g_bow_aim_rel);
+    heading = std::atan2(v.y, v.x);
+    pitch = std::asin(-v.z);  // positive = down
     return true;
 }
 

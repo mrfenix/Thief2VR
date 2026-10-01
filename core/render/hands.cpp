@@ -5,11 +5,14 @@
 #include "../log.h"
 #include "game_models.h"
 #include "hand_model_data.h"
+#include "hand_resources.h"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace hands {
@@ -215,7 +218,69 @@ IDirect3DTexture9* MakeTexture(IDirect3DDevice9* dev, unsigned w, unsigned h, co
     return t;
 }
 
-IDirect3DTexture9* g_grain;  // leather grain (hands)
+// A texture with its mip levels (box filtered), so it doesn't shimmer small.
+IDirect3DTexture9* MakeMippedTexture(IDirect3DDevice9* dev, unsigned w, unsigned h, const unsigned* pixels)
+{
+    UINT levels = 1;
+    for (unsigned s = std::max(w, h); s > 1; s >>= 1)
+        ++levels;
+    IDirect3DTexture9* t = nullptr;
+    if (FAILED(dev->CreateTexture(w, h, levels, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t, nullptr)))
+        return MakeTexture(dev, w, h, pixels);
+    std::vector<unsigned> level(pixels, pixels + (size_t)w * h), next;
+    for (UINT l = 0; l < levels; ++l) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(t->LockRect(l, &lr, nullptr, 0))) {
+            for (unsigned y = 0; y < h; ++y)
+                memcpy(static_cast<unsigned char*>(lr.pBits) + y * lr.Pitch, level.data() + (size_t)y * w, w * 4);
+            t->UnlockRect(l);
+        }
+        unsigned nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+        next.assign((size_t)nw * nh, 0);
+        for (unsigned y = 0; y < nh; ++y)
+            for (unsigned x = 0; x < nw; ++x) {
+                unsigned sum[4] = {};
+                for (unsigned k = 0; k < 4; ++k) {
+                    unsigned sx = std::min(w - 1, x * 2 + (k & 1)), sy = std::min(h - 1, y * 2 + (k >> 1));
+                    unsigned p = level[(size_t)sy * w + sx];
+                    for (int c = 0; c < 4; ++c)
+                        sum[c] += (p >> (c * 8)) & 255;
+                }
+                unsigned out = 0;
+                for (int c = 0; c < 4; ++c)
+                    out |= ((sum[c] + 2) / 4) << (c * 8);
+                next[(size_t)y * nw + x] = out;
+            }
+        level.swap(next);
+        w = nw;
+        h = nh;
+    }
+    return t;
+}
+
+// The hands' textures (skin, and the glove as black leather), from the DLL's resources.
+IDirect3DTexture9* g_hand_texture[2];
+bool g_hand_texture_tried[2];
+
+IDirect3DTexture9* HandTexture(IDirect3DDevice9* dev, int side)
+{
+    if (g_hand_texture[side] || g_hand_texture_tried[side])
+        return g_hand_texture[side];
+    g_hand_texture_tried[side] = true;
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&HandTexture), &self);
+    HRSRC res = FindResourceW(self, MAKEINTRESOURCEW(side == 0 ? IDR_HAND_LEFT : IDR_HAND_RIGHT), MAKEINTRESOURCEW(10));
+    HGLOBAL data = res ? LoadResource(self, res) : nullptr;
+    const void* bytes = data ? LockResource(data) : nullptr;
+    game_models::Texture image;
+    if (!bytes || !game_models::DecodeImage(bytes, SizeofResource(self, res), image)) {
+        Log("Hands: the %s hand's texture couldn't be loaded", side == 0 ? "left" : "right");
+        return nullptr;
+    }
+    g_hand_texture[side] = MakeMippedTexture(dev, image.w, image.h, image.pixels.data());
+    return g_hand_texture[side];
+}
 
 // --- Hand models ------------------------------------------------------------------------
 struct HandModel {
@@ -335,7 +400,8 @@ D3DCOLOR Shade(const float base[3], float intensity)
                          (int)std::min(255.0f, base[2] * intensity));
 }
 
-// A hand as a black fingerless leather glove, smooth shaded, with the grain texture.
+// A hand as a black fingerless leather glove, smooth shaded, with its texture
+// (the glove and the bare fingers are in it).
 void DrawHand(IDirect3DDevice9* dev, int side, const Hand& h, const Eye& eye, float light)
 {
     static std::vector<SkinnedVertex> world;
@@ -343,8 +409,9 @@ void DrawHand(IDirect3DDevice9* dev, int side, const Hand& h, const Eye& eye, fl
     const HandModel& m = kModels[side];
     Mat3 to_eye = Transpose(eye.rot);
     Vec3 light_dir = Normalize(eye.rot * Vec3{0.3f, 0.3f, 1.0f});  // from above, a little in front
-    const float leather[3] = {48, 44, 42}, skin[3] = {200, 150, 120};
-    const float kGrainTiling = 3.0f;
+    IDirect3DTexture9* texture = HandTexture(dev, side);
+    // Without the texture: plain colours (leather, and skin for the bare fingers).
+    const float leather[3] = {48, 44, 42}, skin[3] = {200, 150, 120}, white[3] = {255, 255, 255};
     std::vector<DrawVertex> verts;
     verts.reserve(m.triangle_count * 3);
     for (int t = 0; t < m.triangle_count; ++t) {
@@ -356,17 +423,17 @@ void DrawHand(IDirect3DDevice9* dev, int side, const Hand& h, const Eye& eye, fl
             visible = Project(eye, to_eye, world[i].p, out[k]);
             float diffuse = std::max(0.0f, Dot(world[i].n, light_dir));
             float intensity = (0.45f + 0.8f * diffuse) * light;
-            out[k].color = Shade(v[16] > 0.5f ? skin : leather, intensity);
-            out[k].u = v[6] * kGrainTiling;
-            out[k].v = v[7] * kGrainTiling;
+            out[k].color = Shade(texture ? white : v[16] > 0.5f ? skin : leather, intensity);
+            out[k].u = v[6];
+            out[k].v = v[7];
         }
         if (visible)
             verts.insert(verts.end(), out, out + 3);
     }
     if (verts.empty())
         return;
-    dev->SetTexture(0, g_grain);
-    dev->SetTextureStageState(0, D3DTSS_COLOROP, g_grain ? D3DTOP_MODULATE : D3DTOP_SELECTARG2);
+    dev->SetTexture(0, texture);
+    dev->SetTextureStageState(0, D3DTSS_COLOROP, texture ? D3DTOP_MODULATE : D3DTOP_SELECTARG2);
     dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
     dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
     dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, (UINT)verts.size() / 3, verts.data(), sizeof(DrawVertex));
@@ -438,10 +505,11 @@ void EnsureWeaponTextures(IDirect3DDevice9* dev, WeaponModel& w)
         w.textures.push_back(MakeTexture(dev, t.w, t.h, t.pixels.data()));
 }
 
-void DrawWeapon(IDirect3DDevice9* dev, WeaponModel& w, const WeaponPose& pose, const Eye& eye, float light)
+// A game model, each vertex placed by to_world(model point).
+template <class ToWorld>
+void DrawModel(IDirect3DDevice9* dev, WeaponModel& w, const Eye& eye, float light, ToWorld to_world)
 {
     EnsureWeaponTextures(dev, w);
-    Affine model_to_world = Affine{pose.r, pose.p} * Affine{w.to_frame, w.to_frame * (w.grip * -1.0f)};
     Mat3 to_eye = Transpose(eye.rot);
     DWORD level = (DWORD)(std::min(1.0f, light) * 255.0f);
     D3DCOLOR c = D3DCOLOR_ARGB(255, level, level, level);
@@ -450,7 +518,7 @@ void DrawWeapon(IDirect3DDevice9* dev, WeaponModel& w, const WeaponPose& pose, c
         DrawVertex out[3];
         bool visible = true;
         for (int k = 0; k < 3 && visible; ++k) {
-            visible = Project(eye, to_eye, model_to_world * t.p[k], out[k]);
+            visible = Project(eye, to_eye, to_world(t.p[k]), out[k]);
             out[k].color = c;
             out[k].u = t.uv[k][0];
             out[k].v = t.uv[k][1];
@@ -470,17 +538,181 @@ void DrawWeapon(IDirect3DDevice9* dev, WeaponModel& w, const WeaponPose& pose, c
     }
 }
 
+void DrawWeapon(IDirect3DDevice9* dev, WeaponModel& w, const WeaponPose& pose, const Eye& eye, float light)
+{
+    Affine model_to_world = Affine{pose.r, pose.p} * Affine{w.to_frame, w.to_frame * (w.grip * -1.0f)};
+    DrawModel(dev, w, eye, light, [&](Vec3 p) { return model_to_world * p; });
+}
+
+// --- The bow ------------------------------------------------------------------------------
+// Models held by name (the bow, the arrows), loaded from the game files on first use.
+struct HeldModel {
+    std::string file;
+    WeaponModel w;
+};
+std::vector<std::unique_ptr<HeldModel>> g_held;
+
+WeaponModel* Held(const char* file)
+{
+    for (const auto& h : g_held)
+        if (_stricmp(h->file.c_str(), file) == 0)
+            return h->w.loaded ? &h->w : nullptr;
+    auto h = std::make_unique<HeldModel>();
+    h->file = file;
+    h->w.loaded = game_models::Load(file, h->w.model);
+    if (h->w.loaded)
+        Log("Hands: %s loaded (%d triangles)", file, (int)h->w.model.triangles.size());
+    WeaponModel* w = h->w.loaded ? &h->w : nullptr;
+    g_held.push_back(std::move(h));
+    return w;
+}
+
+// bow2.bin: up the bow along model Z (tips at +-1.89 ft), the handle around
+// Z = 0 on the -Y side; the limbs sweep towards +Y (the target) and the tips
+// back to -Y (the archer, where the string runs). Bow frame (x towards the
+// target, y left, z up) = model (Y, -X, Z) about the handle's centre.
+struct BowShape {
+    bool ready = false;
+    Mat3 to_frame;
+    Vec3 handle;     // model
+    float height;    // handle to tip (ft)
+    float tip_x;     // the tips' frame x (unbent)
+};
+BowShape g_bow_shape;
+const char* const kBowModel = "bow2.bin";
+// The string at rest is kBraceBend behind the unbent tips (the limbs bend back
+// that far when strung); drawn fully, the limbs bend a further kDrawBend and
+// the tips come in by kDrawInward. The arrow lies kRestUp above the handle's
+// centre, its nock at most kMaxDraw behind that.
+constexpr float kBraceBend = 0.45f, kDrawBend = 0.55f, kDrawInward = 0.15f, kLimbStart = 0.25f;
+constexpr float kRestUp = 0.13f, kMaxDraw = 2.3f;
+constexpr float kArrowSide = 0.1f;  // the arrow passes beside the bow (the limbs are ~0.08 ft either side)
+constexpr float kPinchAhead = 0.12f;  // the drawing fingers, ahead of the hand's grip point
+
+const BowShape* Bow()
+{
+    if (g_bow_shape.ready)
+        return &g_bow_shape;
+    WeaponModel* w = Held(kBowModel);
+    if (!w)
+        return nullptr;
+    BowShape& s = g_bow_shape;
+    s.to_frame = FromColumns({0, -1, 0}, {1, 0, 0}, {0, 0, 1});  // columns: model X, Y, Z in the frame
+    Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+    float top = 0;
+    for (const game_models::Triangle& t : w->model.triangles)
+        for (const Vec3& p : t.p) {
+            top = std::max(top, std::fabs(p.z));
+            if (std::fabs(p.z) < 0.25f) {
+                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+            }
+        }
+    s.handle = lo.x <= hi.x ? (lo + hi) * 0.5f : Vec3{};
+    s.height = top - std::fabs(s.handle.z);
+    float sum = 0;
+    int n = 0;
+    for (const game_models::Triangle& t : w->model.triangles)
+        for (const Vec3& p : t.p)
+            if (std::fabs(p.z) > top - 0.06f) {
+                sum += (s.to_frame * (p - s.handle)).x;
+                ++n;
+            }
+    s.tip_x = n ? sum / n : 0.0f;
+    s.ready = true;
+    Log("Hands: bow handle (%.2f %.2f %.2f), handle to tip %.2f ft, tips %.2f ft behind the handle", s.handle.x,
+        s.handle.y, s.handle.z, s.height, -s.tip_x);
+    return &s;
+}
+
+// A bow point (frame) with the limbs bent for the draw.
+Vec3 Bend(Vec3 f, float draw, const BowShape& s)
+{
+    float h = std::fabs(f.z);
+    if (h <= kLimbStart)
+        return f;
+    float t = (h - kLimbStart) / std::max(0.1f, s.height - kLimbStart);
+    t *= t;
+    f.x -= (kBraceBend + draw * kDrawBend) * t;
+    f.z -= (f.z > 0 ? 1.0f : -1.0f) * draw * kDrawInward * t;
+    return f;
+}
+
+Vec3 BowTip(const BowShape& s, float draw, float sign)
+{
+    return {s.tip_x - kBraceBend - draw * kDrawBend, 0.0f, sign * (s.height - draw * kDrawInward)};
+}
+
+// A thin strip facing the eye from a to b (the string).
+void DrawStrip(IDirect3DDevice9* dev, const Eye& eye, Vec3 a, Vec3 b, float width, D3DCOLOR c)
+{
+    Vec3 side = Cross(b - a, eye.pos - (a + b) * 0.5f);
+    float len = Length(side);
+    if (len < 1e-6f)
+        return;
+    side = side * (width * 0.5f / len);
+    Mat3 to_eye = Transpose(eye.rot);
+    Vec3 corner[4] = {a - side, a + side, b + side, b - side};
+    DrawVertex v[4];
+    for (int k = 0; k < 4; ++k) {
+        if (!Project(eye, to_eye, corner[k], v[k]))
+            return;
+        v[k].color = c;
+        v[k].u = v[k].v = 0;
+    }
+    DrawVertex tris[6] = {v[0], v[1], v[2], v[0], v[2], v[3]};
+    dev->SetTexture(0, nullptr);
+    dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, tris, sizeof(DrawVertex));
+}
+
+void DrawBow(IDirect3DDevice9* dev, const BowPose& b, const Eye& eye, float light)
+{
+    const BowShape* s = Bow();
+    WeaponModel* w = Held(kBowModel);
+    if (!s || !w)
+        return;
+    DrawModel(dev, *w, eye, light,
+              [&](Vec3 p) { return b.grip + b.r * Bend(s->to_frame * (p - s->handle), b.draw, *s); });
+    // The string: tip, nock, tip.
+    float shade = std::min(1.0f, light) * 70.0f;
+    D3DCOLOR string_color = D3DCOLOR_ARGB(255, (int)shade, (int)(shade * 0.9f), (int)(shade * 0.75f));
+    const float kStringWidth = 0.008f;
+    Vec3 top = b.grip + b.r * BowTip(*s, b.draw, 1.0f), bottom = b.grip + b.r * BowTip(*s, b.draw, -1.0f);
+    DrawStrip(dev, eye, top, b.nock, kStringWidth, string_color);
+    DrawStrip(dev, eye, b.nock, bottom, kStringWidth, string_color);
+    // The nocked arrow: its nock (the model's -X end) on the string, along the
+    // bow; or still in the drawing hand.
+    if (b.arrow) {
+        if (WeaponModel* a = Held(b.arrow)) {
+            const Mat3& r = b.arrow_in_hand ? b.hand_r : b.r;
+            Vec3 nock = b.arrow_in_hand ? b.hand_nock : b.nock;
+            Vec3 x = r * Vec3{1, 0, 0}, y = r * Vec3{0, 1, 0}, z = r * Vec3{0, 0, 1};
+            float nock_x = a->model.bbox_min.x;
+            DrawModel(dev, *a, eye, light, [&](Vec3 p) { return nock + x * (p.x - nock_x) + y * p.y + z * p.z; });
+        }
+    }
+}
+
 void ReleaseTextures()
 {
-    for (WeaponModel* w : {&g_sword, &g_blackjack}) {
+    std::vector<WeaponModel*> models{&g_sword, &g_blackjack};
+    for (const auto& h : g_held)
+        models.push_back(&h->w);
+    for (WeaponModel* w : models) {
         for (IDirect3DTexture9* t : w->textures)
             if (t)
                 t->Release();
         w->textures.clear();
     }
-    if (g_grain)
-        g_grain->Release();
-    g_grain = nullptr;
+    for (int side = 0; side < 2; ++side) {
+        if (g_hand_texture[side])
+            g_hand_texture[side]->Release();
+        g_hand_texture[side] = nullptr;
+        g_hand_texture_tried[side] = false;
+    }
 }
 
 }  // namespace
@@ -489,8 +721,9 @@ DrawCapture ArmLightCapture()
 {
     // Last frame's arm.
     // Only one arm's points in a frame decide it; mixed frames add to the
-    // score. A known weapon object decides until then.
-    if (g_arm_vertices > 0) {
+    // score. A known weapon object decides until then. (Only with a sword /
+    // blackjack out: the bow's arm is captured too.)
+    if (g_arm_vertices > 0 && g_weapon_obj) {
         Weapon clear = Weapon::None;
         if (GetTickCount64() - g_arm_reset_ms >= kSettleMs) {
             if (g_sword_hits >= 3 && g_blackjack_hits == 0)
@@ -501,9 +734,14 @@ DrawCapture ArmLightCapture()
                              : clear == Weapon::Blackjack ? kScoreLimit
                                                           : std::max(-kScoreLimit, std::min(kScoreLimit, g_weapon_score + g_blackjack_hits - g_sword_hits));
         }
+        // A weak clear frame (a few points) doesn't overturn a known weapon object.
+        Weapon known = KindOf(g_weapon_obj);
+        if (clear != Weapon::None && known != Weapon::None && clear != known &&
+            std::max(g_sword_hits, g_blackjack_hits) < 8)
+            clear = Weapon::None;
         if (clear != Weapon::None)
             Learn(g_weapon_obj, clear);
-        Weapon known = KindOf(g_weapon_obj);
+        known = KindOf(g_weapon_obj);
         Weapon now = clear != Weapon::None             ? clear
                      : known != Weapon::None           ? known
                      : g_weapon_score >= kScoreDecide  ? Weapon::Blackjack
@@ -515,7 +753,7 @@ DrawCapture ArmLightCapture()
                 g_weapon_score);
             g_arm_weapon = now;
         }
-        if (g_arm_weapon == Weapon::None && ++g_undecided_frames == 120 && !g_undecided_logged) {
+        if (g_weapon_obj && g_arm_weapon == Weapon::None && ++g_undecided_frames == 120 && !g_undecided_logged) {
             g_undecided_logged = true;
             Log("Hands: can't tell the weapon (texture points: sword %d, blackjack %d of %d vertices; uv sample "
                 "%.3f,%.3f %.3f,%.3f %.3f,%.3f %.3f,%.3f)",
@@ -613,28 +851,75 @@ void WeaponFrame(const Hand& right, float world_scale, Mat3& r, Vec3& p)
     p = right.b + right.a * right.grip_pos;
 }
 
+bool MakeBow(const BowInput& in, BowPose& out, Vec3& shot_centre, Vec3& shot_dir)
+{
+    const BowShape* s = Bow();
+    if (!s)
+        return false;
+    Mat3 r = in.r;
+    Vec3 forward = r * Vec3{1, 0, 0};
+    const Vec3 rest_in_bow{0, in.left_hand ? kArrowSide : -kArrowSide, kRestUp};
+    Vec3 rest = in.grip + r * rest_in_bow;
+    const float brace = kBraceBend - s->tip_x;
+    float draw = 0, pulled_to = brace;
+    if (in.pulled) {
+        // Drawing: the bow turns in the hand to lie along the arrow, from the
+        // drawing fingers to the rest.
+        Vec3 fingers = in.string_hand;
+        Vec3 line = BowArrowLine(forward, rest, fingers);
+        r = RotationBetween(forward, line) * r;
+        forward = line;
+        rest = in.grip + r * rest_in_bow;
+        pulled_to = std::max(brace, std::min(kMaxDraw, Dot(rest - fingers, forward) - kPinchAhead));
+        draw = (pulled_to - brace) / (kMaxDraw - brace);
+    } else if (in.auto_draw >= 0) {
+        draw = std::min(1.0f, in.auto_draw);
+        pulled_to = brace + draw * (kMaxDraw - brace);
+    }
+    out.visible = true;
+    out.r = r;
+    out.grip = in.grip;
+    out.nock = rest - forward * pulled_to;
+    out.draw = draw;
+    out.arrow = in.arrow;
+    // The arrow's centre: its model origin, this far from the nock.
+    float nock_to_centre = 1.63f;
+    if (in.arrow)
+        if (WeaponModel* a = Held(in.arrow))
+            nock_to_centre = -a->model.bbox_min.x;
+    shot_centre = out.nock + forward * nock_to_centre;
+    shot_dir = forward;
+    return true;
+}
+
+Mat3 BowFrameInHand(const Hand& hand, float world_scale)
+{
+    // Grip axes: -Z out of the index-finger end of the fist, -Y towards the
+    // fingers, +X out of the back of the right hand / the palm of the left.
+    // Bow: x (towards the target) = -Y, y = -X, z (up the bow) = -Z.
+    Mat3 in_grip = FromColumns({0, -1, 0}, {-1, 0, 0}, {0, 0, -1});
+    Mat3 rot = hand.a;
+    float inv = world_scale > 0 ? 1.0f / world_scale : 1.0f;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            rot.m[i][j] *= inv;
+    return rot * hand.grip_rot * in_grip;
+}
+
 bool WeaponModelsLoaded()
 {
     return g_sword.loaded || g_blackjack.loaded;
 }
 
 void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* depth, const Eye& eye,
-          const Hand& left, const Hand& right, const WeaponPose& weapon, float brightness)
+          const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, float brightness)
 {
     if (!g_models_tried)
         LoadWeaponModels();
-    if (!Ready() || (!left.visible && !right.visible && weapon.kind == Weapon::None))
+    if (!Ready() || (!left.visible && !right.visible && weapon.kind == Weapon::None && !bow.visible))
         return;
     if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state)))
         return;
-    if (!g_grain) {
-        std::vector<unsigned> px(hand_model::kGrainSize * hand_model::kGrainSize);
-        for (size_t i = 0; i < px.size(); ++i) {
-            unsigned g = hand_model::kGrain[i];
-            px[i] = 0xff000000 | g << 16 | g << 8 | g;
-        }
-        g_grain = MakeTexture(dev, hand_model::kGrainSize, hand_model::kGrainSize, px.data());
-    }
     g_state->Capture();
     IDirect3DSurface9 *old_color = nullptr, *old_depth = nullptr;
     dev->GetRenderTarget(0, &old_color);
@@ -666,7 +951,7 @@ void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* de
     dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-    dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
     dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
     dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
 
@@ -677,6 +962,8 @@ void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* de
         DrawWeapon(dev, g_sword, weapon, eye, light);
     else if (weapon.kind == Weapon::Blackjack && g_blackjack.loaded)
         DrawWeapon(dev, g_blackjack, weapon, eye, light);
+    if (bow.visible)
+        DrawBow(dev, bow, eye, light);
     if (left.visible)
         DrawHand(dev, 0, left, eye, light);
     if (right.visible)

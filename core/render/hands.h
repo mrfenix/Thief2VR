@@ -56,8 +56,41 @@ struct WeaponPose {
     Mat3 r;
     Vec3 p;
 };
+// --- The bow ------------------------------------------------------------------------
+// The game's bow model (bow2.bin) in the bow hand, a string, and the nocked
+// arrow's own model. The bow's frame: x along the arrow (towards the target),
+// z up the bow, origin the handle's centre (in the fist).
+struct BowInput {
+    Mat3 r;                        // the bow's frame (world, unit axes)
+    Vec3 grip;                     // the handle's centre (world)
+    bool pulled = false;           // the other hand is drawing the string (two-handed)
+    Vec3 string_hand;              // the drawing hand's grip point (world)
+    float auto_draw = -1;          // one-handed: how far it's drawn (0..1), -1 = not drawing
+    bool left_hand = true;         // the bow is in the left hand (the arrow passes on its left side)
+    const char* arrow = nullptr;   // the nocked arrow's model file (e.g. "arrow.bin"), or null
+};
+struct BowPose {
+    bool visible = false;
+    Mat3 r;                        // pivoted onto the arrow line while drawing
+    Vec3 grip;
+    Vec3 nock;                     // where the string is pulled to (world)
+    float draw = 0;                // limb bend, 0..1
+    const char* arrow = nullptr;
+    // Not yet on the string: the arrow held in the drawing hand (its frame: x
+    // along the arrow, and where its nock is).
+    bool arrow_in_hand = false;
+    Mat3 hand_r;
+    Vec3 hand_nock;
+};
+// The bow this frame, and where its arrow would leave: the arrow's centre and
+// direction (world). False until the bow model is loaded (from the game files).
+bool MakeBow(const BowInput& in, BowPose& out, Vec3& shot_centre, Vec3& shot_dir);
+// The bow's frame for a hand holding it: the handle through the fist (up the
+// bow out of the index-finger end), the arrow towards the fingers.
+Mat3 BowFrameInHand(const Hand& hand, float world_scale);
+
 void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* depth, const Eye& eye,
-          const Hand& left, const Hand& right, const WeaponPose& weapon, float brightness);
+          const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, float brightness);
 
 // True once the game's weapon models were loaded (on the first Draw).
 bool WeaponModelsLoaded();

@@ -39,6 +39,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ResourceCompile Include="hands.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="log.cpp" />
     <ClCompile Include="config\settings.cpp" />

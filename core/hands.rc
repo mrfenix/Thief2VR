@@ -1,0 +1,6 @@
+// The hand textures (baked by tools/make_hands.py from the Hafnia Hands skin
+// texture, MIT, Copyright (c) 2021 Aske Mottelson).
+#include "render/hand_resources.h"
+
+IDR_HAND_LEFT RCDATA "render\\hand_left.png"
+IDR_HAND_RIGHT RCDATA "render\\hand_right.png"

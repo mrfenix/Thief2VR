@@ -42,6 +42,7 @@ bool g_run_on;
 bool g_moving;
 double g_strike_time = -1;  // seconds the melee hit window has been open, -1 closed
 bool g_bow_drawing;         // two-handed bow: the right hand is drawing the string
+double g_bow_draw_seconds = -1;  // how long "use weapon" has been held with the bow out, or -1
 
 Vec3 GripPos(const XrControllerState& c, int hand)
 {
@@ -73,6 +74,7 @@ void ReleaseAll()
     }
     CloseStrike();
     g_bow_drawing = false;
+    g_bow_draw_seconds = -1;
 }
 
 XrVector2f Deadzone(XrVector2f v, float dz)
@@ -144,8 +146,9 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         float aim_yaw = 0, aim_pitch = 0;
         const bool bow_out = EngineLimbMode() == 1;
         const int bow_hand = s.bow_two_handed ? 0 : 1;
-        bool bow_aim = bow_out && c.pose_valid[bow_hand] && (!s.bow_two_handed || g_bow_drawing);
-        if (bow_aim) {
+        bool bow_aim = bow_out && StereoBowAim(aim_yaw, aim_pitch);
+        if (!bow_aim && bow_out && c.pose_valid[bow_hand] && (!s.bow_two_handed || g_bow_drawing)) {
+            // (Before the bow is shown: the hand's pointing, plus the Bow angle sliders.)
             const float deg = kPi / 180.0f;
             Mat3 adjust = RotZ(s.bow_yaw_deg * deg) * RotY(s.bow_pitch_deg * deg) * RotX(s.bow_roll_deg * deg);
             const XrQuaternionf& q = c.aim_pose[bow_hand].orientation;
@@ -200,14 +203,17 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         // Its speed: from the runtime's velocities if it reports them (v + w x r),
         // otherwise from the movement since last frame.
         float speed = 0;
+        Vec3 tip_velocity{};
         static bool logged_source;
         if (c.velocity_valid[1]) {
             const XrVector3f& v = c.linear_velocity[1];
             const XrVector3f& w = c.angular_velocity[1];
-            speed = Length(Vec3{v.x + (w.y * r.z - w.z * r.y), v.y + (w.z * r.x - w.x * r.z),
-                                v.z + (w.x * r.y - w.y * r.x)});
+            tip_velocity = Vec3{v.x + (w.y * r.z - w.z * r.y), v.y + (w.z * r.x - w.x * r.z),
+                                v.z + (w.x * r.y - w.y * r.x)};
+            speed = Length(tip_velocity);
         } else if (have_last_tip && dt > 0.001) {
-            speed = Length(tip - last_tip) / (float)dt;
+            tip_velocity = (tip - last_tip) * (1.0f / (float)dt);
+            speed = Length(tip_velocity);
         }
         if (!logged_source) {
             logged_source = true;
@@ -218,6 +224,17 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         tip_speed = speed;
 
         if (s.swing_to_attack && melee && !rt && swing_cooldown <= 0 && speed > s.swing_speed) {
+            // A quick follow-up: the last strike ends first (its attack ends and
+            // the arm is ready), or the game would refuse this one.
+            CloseStrike();
+            EngineMeleeReady();
+            {
+                // Diagnostics: the swing's direction relative to where the head faces
+                // (tracking: x right, y up, -z forward).
+                float h = head.track_heading, fwd = -tip_velocity.z, left = -tip_velocity.x;
+                float f2 = std::cos(h) * fwd + std::sin(h) * left, l2 = -std::sin(h) * fwd + std::cos(h) * left;
+                Log("Melee: swing %.1f m/s (right %.1f, up %.1f, forward %.1f)", speed, -l2, tip_velocity.y, f2);
+            }
             swing_hold = 0.001;  // press for one frame, then release = quick swing
             swing_cooldown = 0.4;
             XrControls().Vibrate(1, 0.5f, 0.06f);
@@ -257,6 +274,10 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         XrControls().Vibrate(1, 0.2f, 0.03f);
     bool was_down = g_use_weapon.down;
     g_use_weapon.Set(weapon);
+    if (EngineLimbMode() == 1 && g_use_weapon.down)
+        g_bow_draw_seconds = g_bow_draw_seconds < 0 ? 0.0 : g_bow_draw_seconds + dt;
+    else
+        g_bow_draw_seconds = -1;
 
     // --- Melee hit window: the weapon hits while your hand swings, not when
     //     the arm animation says. Opens as the attack is released (the engine
@@ -344,4 +365,9 @@ bool ControlsLeaning()
 bool ControlsBowDrawing()
 {
     return g_bow_drawing;
+}
+
+double ControlsBowDrawSeconds()
+{
+    return g_bow_draw_seconds;
 }

@@ -100,7 +100,11 @@ void EngineLogPlayerPhysics();
 // right after "use_weapon" was released) and closes the hit window.
 void EngineSetVrMelee(bool enabled);
 bool EngineMeleeStrike(bool open);
-// The player's current weapon object while a sword / blackjack is out, else 0.
+// Before a VR swing's attack press: marks the arm ready for an attack if none is
+// under way (the game's own "ready" can be left unset by the VR timing).
+void EngineMeleeReady();
+// The player's current weapon object while a sword / blackjack or the bow is
+// out (with the bow: the selected arrows), else 0.
 int EngineCurrentWeapon();
 
 // What the player's melee strikes hit since the last call (bit mask), for
@@ -124,3 +128,14 @@ bool EngineArmJoints(float out[][3], int count);
 
 // True while a sword / blackjack attack is under way (wind-up to recovery).
 bool EngineMeleeBusy();
+
+// The bow: the arrow object nocked for the next shot (DAT_00aa0f8c), or 0.
+int EngineNockedArrow();
+// An object's model name (the ModelName property, inherited from its
+// archetype), e.g. "arrow"; false if none.
+bool EngineObjectModelName(int obj, char* out, int size);
+// Where the next arrow leaves from and flies: the drawn arrow's centre relative
+// to the game camera (feet, world axes) and its direction (unit, world). Set
+// every frame while the bow is out; the player's bow shot uses it instead of
+// the game's own spot and the camera's facing (valid = false: the game's).
+void EngineSetBowShot(bool valid, const float offset[3], const float dir[3]);

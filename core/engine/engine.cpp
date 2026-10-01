@@ -490,6 +490,7 @@ namespace {
 void* g_weapon_update_trampoline;
 void* g_sphere_set_trampoline;
 int g_player_weapon_in_update;  // weapon obj while the player's arm is placing its spheres, else 0
+int g_strike_updates, g_strike_sphere_calls;  // diagnostics: the arm's weapon updates / any sphere placement
 WeaponPointTransform g_weapon_transform;
 
 // Snapshot of the arm's last weapon update (for the F12 dump / logging).
@@ -503,6 +504,21 @@ struct ArmWeaponState {
     int joints_read = 0;
     bool physical = false;
 } g_arm_weapon;
+
+// The arm's weapon table index per weapon object (from the engine's own
+// updates), and how many arm weapon updates there have been.
+struct WeaponIndex {
+    int weapon = 0, index = -1;
+} g_weapon_index[4];
+int g_arm_update_count;
+
+int WeaponIndexOf(int weapon)
+{
+    for (const WeaponIndex& w : g_weapon_index)
+        if (w.weapon == weapon)
+            return w.index;
+    return -1;
+}
 
 void SnapshotArmWeapon(unsigned char* creature, int weapon, int index)
 {
@@ -548,6 +564,13 @@ bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int w
         return original(creature, nullptr, weapon, index);
 
     SnapshotArmWeapon(creature, weapon, index);
+    ++g_strike_updates;
+    ++g_arm_update_count;
+    if (WeaponIndexOf(weapon) != index) {
+        static int next;
+        g_weapon_index[next] = {weapon, index};
+        next = (next + 1) % 4;
+    }
     g_player_weapon_in_update = g_weapon_transform ? weapon : 0;
     bool result = original(creature, nullptr, weapon, index);
     g_player_weapon_in_update = 0;
@@ -556,15 +579,30 @@ bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int w
     return result;
 }
 
+// Diagnostics for the open hit window (see EngineMeleeStrike).
+ULONGLONG g_strike_opened;
+int g_strike_placements;
+float g_strike_near = 1e9f, g_strike_far;
+int g_strike_events;
+
 void __cdecl TransformWeaponPoint(float* point)
 {
     if (g_weapon_transform)
         g_weapon_transform(point);
+    if (int* cam = *g_engine.current_camera) {
+        const float* c = reinterpret_cast<const float*>(cam + 2);
+        float dx = point[0] - c[0], dy = point[1] - c[1], dz = point[2] - c[2];
+        float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        ++g_strike_placements;
+        g_strike_near = std::fmin(g_strike_near, d);
+        g_strike_far = std::fmax(g_strike_far, d);
+    }
 }
 
 __declspec(naked) void SphereSetDetour()
 {
     __asm {
+        inc dword ptr [g_strike_sphere_calls]
         mov eax, [esp + 4]  // object
         test eax, eax
         je passthrough
@@ -733,8 +771,10 @@ void __cdecl OnDamageCall(int slot, int victim, int culprit)
 {
     if (!g_melee_weapon || GetTickCount64() > g_melee_until)
         return;
-    if (culprit == g_melee_weapon || victim == g_melee_weapon)
+    if (culprit == g_melee_weapon || victim == g_melee_weapon) {
         g_melee_events |= slot == 4 ? kMeleeHitDamage : kMeleeHitImpact;
+        g_strike_events |= slot == 4 ? kMeleeHitDamage : kMeleeHitImpact;
+    }
 }
 
 // Arity-agnostic: reads victim/culprit, then continues into the original.
@@ -930,6 +970,9 @@ void EngineClearListenerPose()
     g_head_until = 0;
 }
 
+static unsigned char* CreatureOf(int obj);
+int g_strike_self_updates;
+
 int EngineTakeMeleeHits()
 {
     // A wall stops the swing: the engine takes the weapon's physics away.
@@ -937,6 +980,20 @@ int EngineTakeMeleeHits()
         g_strike_stopped = true;
         g_melee_events |= kMeleeHitWall;
     }
+    // The engine only places the weapon's hit spheres (and tests them for hits)
+    // while the arm's swing motion runs, which can end before the VR swing
+    // does: while the hit window is open, any frame without that update gets
+    // one here (FUN_0055fcd0, through its hook, so the spheres are in the hand).
+    static int seen_updates;
+    if (g_strike_weapon && !g_strike_stopped && g_arm_update_count == seen_updates) {
+        unsigned char* creature = CreatureOf(g_strike_arm);
+        int index = WeaponIndexOf(g_strike_weapon);
+        if (creature && index >= 0) {
+            ++g_strike_self_updates;
+            WeaponUpdateDetour(creature, nullptr, g_strike_weapon, index);
+        }
+    }
+    seen_updates = g_arm_update_count;
     int events = g_melee_events;
     g_melee_events = 0;
     return events;
@@ -952,12 +1009,40 @@ bool EngineMeleeStrike(bool open)
     if (!g_vr_melee || !g_player_object)
         return false;
     if (!open) {
-        if (g_strike_weapon)
+        if (g_strike_weapon) {
+            bool physical = g_get_phys_model && g_get_phys_model(g_strike_weapon);
             CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
+            // Diagnostics: this strike, and each weapon's hit spheres once.
+            if (g_strike_stopped)
+                g_strike_events |= kMeleeHitWall;
+            Log("Melee: strike %llu ms, %d arm weapon updates (%d by Thief2VR), %d sphere sets (any), weapon %s, "
+                "%d sphere placements at %.1f-%.1f ft, hits:%s%s%s%s",
+                GetTickCount64() - g_strike_opened, g_strike_updates, g_strike_self_updates, g_strike_sphere_calls,
+                physical ? "physical" : "not physical",
+                g_strike_placements, g_strike_placements ? g_strike_near : 0.0f,
+                g_strike_far, g_strike_events & kMeleeHitDamage ? " damage" : "",
+                g_strike_events & kMeleeHitImpact ? " impact" : "", g_strike_events & kMeleeHitWall ? " wall" : "",
+                g_strike_events ? "" : " none");
+            static int logged_weapon[2];
+            const ArmWeaponState& a = g_arm_weapon;
+            if (a.valid && a.weapon == g_strike_weapon && logged_weapon[0] != a.weapon && logged_weapon[1] != a.weapon) {
+                logged_weapon[logged_weapon[0] ? 1 : 0] = a.weapon;
+                for (int i = 0; i < a.spheres; ++i)
+                    Log("Melee: weapon %d hit sphere %d: joints %d-%d t %.2f radius %.2f ft", a.weapon, i, a.joint_a[i],
+                        a.joint_b[i], a.t[i], a.radius[i]);
+            }
+        }
         g_strike_arm = g_strike_weapon = 0;
         if (g_end_attack_pending && g_end_attack_tramp) {
             g_end_attack_pending = false;
             reinterpret_cast<void(__cdecl*)(int, int)>(g_end_attack_tramp)(g_end_attack_args[0], g_end_attack_args[1]);
+            // The attack end also arms "ready for the next attack" (DAT_00890f8c
+            // = 1, LAB_0046bc90) for the arm motion's next 0x2000 flag, which
+            // has passed by now: ready it here instead.
+            int* ready = reinterpret_cast<int*>(g_base + 0x490f8c);
+            if (!*reinterpret_cast<int*>(g_base + 0x490f94) && !*reinterpret_cast<int*>(g_base + 0x490f98) &&
+                !*reinterpret_cast<int*>(g_base + 0x490f9c))
+                *ready = 1;
         }
         g_melee_until = GetTickCount64() + 300;  // late hit reports still count
         return true;
@@ -966,16 +1051,135 @@ bool EngineMeleeStrike(bool open)
     int released = *reinterpret_cast<int*>(g_base + 0x490f94);  // DAT_00890f94
     int arm = EngineArmObject();
     int weapon = CallCurWeapon(*g_player_object);
-    if (!released || !arm || weapon <= 0)
-        return false;  // e.g. the game refused the attack (still recovering from the last one)
+    if (!released || !arm || weapon <= 0) {
+        // E.g. the game refused the attack (still recovering from the last one).
+        int* limb_state = *reinterpret_cast<int**>(g_base + 0x6a1444);  // DAT_00aa1444
+        Log("Melee: no hit window (released %d, ready %d, winding %d, swinging %d, arm state %d, arm %d, weapon %d)",
+            released, *reinterpret_cast<int*>(g_base + 0x490f8c), *reinterpret_cast<int*>(g_base + 0x490f9c),
+            *reinterpret_cast<int*>(g_base + 0x490f98), limb_state ? limb_state[0x24 / 4] : -1, arm, weapon);
+        return false;
+    }
     InstallHitFeedback();
     CallCreatureWeapon(g_weapon_on_fn, arm, weapon);
     g_strike_arm = arm;
     g_strike_weapon = weapon;
     g_strike_stopped = false;
+    g_strike_opened = GetTickCount64();
+    g_strike_placements = 0;
+    g_strike_updates = g_strike_sphere_calls = g_strike_self_updates = 0;
+    g_strike_near = 1e9f;
+    g_strike_far = 0;
+    g_strike_events = 0;
     g_melee_weapon = weapon;
     g_melee_until = GetTickCount64() + 1500;
     return true;
+}
+
+// --- The bow shot ---
+// The bow fires with FUN_005500e0(player, arrow DAT_00aa0f8c, power, 0x204, 0, 0, 0)
+// (from FUN_0046aed0). FUN_005500e0 launches a projectile: cdecl(launcher,
+// projectile, power, flags, extra velocity*, ?, start point*). Without a start
+// point it takes the projectile's own position, and its facing from the
+// launcher; for the player (FUN_0054ffa0) that's the player camera's angles
+// (DAT_00aa141c + 0x14: 16-bit bank, pitch, heading). So the arrow left from the
+// engine's own (unpinned) bow, along the camera. For the player's nocked arrow
+// the start point is the drawn arrow's centre and the camera's angles are set
+// to its direction for the call.
+using LaunchFn = int(__cdecl*)(int, int, float, unsigned, float*, int, float*);
+static LaunchFn g_launch_tramp;
+static bool g_bow_shot_valid;
+static float g_bow_shot_offset[3], g_bow_shot_dir[3];
+
+static int __cdecl LaunchDetour(int launcher, int projectile, float power, unsigned flags, float* velocity, int arg6,
+                                float* start)
+{
+    int* cam = *g_engine.current_camera;
+    int player = *reinterpret_cast<int*>(g_base + 0x6a1418);  // DAT_00aa1418
+    if (!g_bow_shot_valid || start || !cam || cam[0] != 0 || launcher != player || projectile <= 0 ||
+        projectile != EngineNockedArrow() || EngineLimbMode() != 1)
+        return g_launch_tramp(launcher, projectile, power, flags, velocity, arg6, start);
+
+    // Within arm's reach of the camera, like the game's own spot.
+    const float* c = reinterpret_cast<const float*>(cam + 2);
+    float o[3] = {g_bow_shot_offset[0], g_bow_shot_offset[1], g_bow_shot_offset[2]};
+    float reach = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+    const float kMaxReach = 2.5f;
+    if (reach > kMaxReach)
+        for (float& v : o)
+            v *= kMaxReach / reach;
+    float from[3] = {c[0] + o[0], c[1] + o[1], c[2] + o[2]};
+
+    // Facing: forward = RotZ(heading) * RotY(pitch) * x = (cos p cos h, cos p sin h, -sin p).
+    const float* d = g_bow_shot_dir;
+    const float to16 = 65536.0f / (2.0f * 3.14159265f);
+    float heading = std::atan2(d[1], d[0]);
+    float pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, -d[2])));
+    uint16_t* angles = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
+    uint16_t saved[3] = {angles[0], angles[1], angles[2]};
+    angles[0] = 0;
+    angles[1] = static_cast<uint16_t>(static_cast<int>(std::lround(pitch * to16)));
+    angles[2] = static_cast<uint16_t>(static_cast<int>(std::lround(heading * to16)));
+    int result = g_launch_tramp(launcher, projectile, power, flags, velocity, arg6, from);
+    angles[0] = saved[0];
+    angles[1] = saved[1];
+    angles[2] = saved[2];
+    Log("Bow: shot from %.2f ft of the camera, direction (%.2f %.2f %.2f), power %.2f", reach > kMaxReach ? kMaxReach : reach,
+        d[0], d[1], d[2], power);
+    return result;
+}
+
+int EngineNockedArrow()
+{
+    return g_base ? *reinterpret_cast<int*>(g_base + 0x6a0f8c) : 0;  // DAT_00aa0f8c
+}
+
+bool EngineObjectModelName(int obj, char* out, int size)
+{
+    // The ModelName property (DAT_00ab00c4, set up by the engine), read as
+    // FUN_005bd430 does (all __stdcall, this first):
+    //   vtbl 0x28 (obj): whether the object has the property itself;
+    //   if not, the object it inherits it from: the property's interface
+    //   IID 0x007ddd40 (QueryInterface, vtbl 0), vtbl 0x1c (obj);
+    //   vtbl 0x54 Get(obj, const char** name).
+    void** prop = g_base ? *reinterpret_cast<void***>(g_base + 0x6b00c4) : nullptr;
+    if (!prop || obj == 0 || size <= 0)
+        return false;
+    __try {
+        void** vt = *reinterpret_cast<void***>(prop);
+        int from = obj;
+        auto has = reinterpret_cast<int(__stdcall*)(void*, int)>(vt[0x28 / 4]);
+        if (!has(prop, obj)) {
+            static void** donors;
+            if (!donors) {
+                auto query = reinterpret_cast<long(__stdcall*)(void*, const void*, void**)>(vt[0]);
+                void* out = nullptr;
+                if (query(prop, g_base + 0x3ddd40, &out) != 0 || !out)
+                    return false;
+                donors = static_cast<void**>(out);
+            }
+            auto donor = reinterpret_cast<int(__stdcall*)(void*, int)>((*reinterpret_cast<void***>(donors))[0x1c / 4]);
+            from = donor(donors, obj);
+        }
+        auto get = reinterpret_cast<int(__stdcall*)(void*, int, const char**)>(vt[0x54 / 4]);
+        const char* name = nullptr;
+        if (!get(prop, from, &name) || !name || !name[0])
+            return false;
+        strncpy_s(out, size, name, _TRUNCATE);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void EngineSetBowShot(bool valid, const float offset[3], const float dir[3])
+{
+    g_bow_shot_valid = valid && g_launch_tramp;
+    if (!valid)
+        return;
+    for (int i = 0; i < 3; ++i) {
+        g_bow_shot_offset[i] = offset[i];
+        g_bow_shot_dir[i] = dir[i];
+    }
 }
 
 static void InstallWeaponHooks()
@@ -1048,6 +1252,19 @@ static void InstallWeaponHooks()
     } else {
         Log("Engine: swing start signature mismatch; swings wait for the wind-up animation");
     }
+
+    unsigned char* launch = g_base + 0x1500e0;  // FUN_005500e0
+    if (Matches(launch, "55 8b ec 83 e4 f8 a1 ?? ?? ?? ?? 81 ec cc 00 00 00 53 8b 5d 0c 56 57")) {
+        MH_STATUS ls = MH_CreateHook(launch, reinterpret_cast<void*>(&LaunchDetour),
+                                     reinterpret_cast<void**>(&g_launch_tramp));
+        if (ls == MH_OK)
+            ls = MH_EnableHook(launch);
+        if (ls != MH_OK)
+            g_launch_tramp = nullptr;
+        Log("Engine: launch hook %s", MH_StatusToString(ls));
+    } else {
+        Log("Engine: launch signature mismatch; arrows leave from the game's own spot");
+    }
 }
 
 void EngineSetWeaponPointTransform(WeaponPointTransform transform)
@@ -1096,9 +1313,21 @@ bool EngineArmJoints(float out[][3], int count)
     }
 }
 
+void EngineMeleeReady()
+{
+    // No attack under way (winding up, released, swinging) and none held back:
+    // the arm is ready for the next one, whatever missed arming it.
+    if (!g_vr_melee || !g_base || g_end_attack_pending)
+        return;
+    if (!*reinterpret_cast<int*>(g_base + 0x490f94) && !*reinterpret_cast<int*>(g_base + 0x490f98) &&
+        !*reinterpret_cast<int*>(g_base + 0x490f9c))
+        *reinterpret_cast<int*>(g_base + 0x490f8c) = 1;  // DAT_00890f8c
+}
+
 int EngineCurrentWeapon()
 {
-    if (!g_cur_weapon_fn || !g_player_object || !*g_player_object || EngineLimbMode() != 2)
+    int limb = EngineLimbMode();
+    if (!g_cur_weapon_fn || !g_player_object || !*g_player_object || (limb != 1 && limb != 2))
         return 0;
     return CallCurWeapon(*g_player_object);
 }

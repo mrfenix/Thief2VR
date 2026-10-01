@@ -50,6 +50,7 @@ Copy-Item (Join-Path $root 'third_party\minhook\LICENSE.txt') (Join-Path $stage 
 Copy-Item (Join-Path $root 'third_party\imgui\LICENSE.txt') (Join-Path $stage 'licenses\DearImGui.txt')
 Copy-Item (Join-Path $root 'third_party\openxr\share\doc\openxr\LICENSE') (Join-Path $stage 'licenses\OpenXR-loader.txt')
 Copy-Item (Join-Path $root 'third_party\generic-hand\LICENSE.md') (Join-Path $stage 'licenses\WebXR-generic-hand.txt')
+Copy-Item (Join-Path $root 'third_party\hafnia-hands\LICENSE') (Join-Path $stage 'licenses\Hafnia-Hands.txt')
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }

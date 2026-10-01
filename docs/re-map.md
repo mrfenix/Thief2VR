@@ -105,7 +105,8 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
   - A request (e.g. the swing, `FUN_0054c830`) starts at once only if the motion controller (`[6]`, vtbl 0x30(`[2]`)) isn't busy: it then stops the current motion (`(*[0])->vtbl 0x24(0)`) and calls `FUN_0054c780` (ESI = the arm state). Otherwise it waits for the current motion (the wind-up) to finish.
   - **Swing sound:** entering an arm state (`FUN_0054bf40`) plays "Event Motion" plus the state's tags (e.g. `PlyrSword 1, PlyrSwordSwing 1, Direction 1`) through the tag sound player `FUN_005738d0(tags, arm, weapon, params)`, so the swing sound comes when the swing motion starts. (`FUN_0057e290` "Event WeaponSwing" is the AI creatures' motion-flag swing sound, not the player's.)
   - In testing, the OpenAL function pointers resolved by `FUN_006aa0c0` (e.g. `alSourcePlay` at `DAT_00a9d598`, the module at `DAT_00a9d588`) read null at runtime, so sound-level tracing has to happen above the driver (e.g. at `FUN_005738d0`).
-- **Hit spheres:** `FUN_0055fcd0` (a creature method, `__thiscall(creature, weapon, weapon index)`, RET 8) runs each frame while the weapon has physics.
+- **Hit spheres:** `FUN_0055fcd0` (a creature method, `__thiscall(creature, weapon, weapon index)`, RET 8) runs each frame while the weapon has physics *and* the arm's attack motion runs (it stops once the motion ends, even with the weapon still physical). With the swing motion started at once, Thief2VR calls it itself each frame of its hit window that the engine doesn't (`EngineTakeMeleeHits`), with the weapon index seen in the engine's own calls.
+  - `FUN_00537270` is also called by each creature's body update (`0x0055f613`, …) for its own body spheres (object = the creature).
   - The spheres come from the creature type's weapon table: `DAT_00aa1554[creature+0x38] + 0x3c`, then `[index]` = {count, entries of 5 dwords: joint A, joint B, t, radius, ?}.
   - Each sphere is placed at `lerp(joint A, joint B, t)` of the joints (world space, `creature+0x19c`) by `FUN_00537270` (cdecl(obj, sphere), point in EDI).
   - For the player it also raycasts from the player to each sphere, and on a hit calls `IDamageModel::HandleImpact`.
@@ -121,6 +122,7 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
   - With VR melee on, the 0x1000/0x2000 callbacks are ignored. The swing opens the hit window right after its quick attack is released (`f94` set) and closes it when the hand slows.
   - With VR melee on and a sword / blackjack out, the swing request always starts the swing motion at once (as in the not-busy case), so the swing sound plays as the player swings.
   - The attack end (`FUN_0046bca0`, cdecl(a, b): the swing motion's end callback, installed by `FUN_0046c230`; also called when the weapon is put away from `FUN_0046c3a0`) is held back while the VR hit window is open and run when it closes, so a short swing motion doesn't switch the hits off mid-swing.
+  - "Ready for the next attack" is `DAT_00890f8c`: cleared at release (`FUN_0046ca90`), set again by `LAB_0046bc90`, which the attack end registers for the arm motion's next 0x2000 flag (also set at limb setup, `FUN_0046c230`). `FUN_0046c950` refuses an attack while it's 0. When the attack end was held back, that flag has passed, so Thief2VR sets it itself.
   - The weapon is pinned to a recorded rest pose (joint frame 2-3-4 relative to the game camera), so the arm animation doesn't show.
 
 ### Bow arm
@@ -137,6 +139,15 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - The bow is upright about 2 ft ahead, and the arrow runs parallel to the camera's forward axis (its vanishing point is the screen centre).
 - At rest the bow is lowered and tilted.
 - Thief2VR always pins the bow to this full-draw pose and puts its grip (between 4 and 6) in the hand. Camera-forward then maps to the arrow direction.
+- **First-person bow mesh:** `BOWSITE.BIN` in `mesh.crf` (materials `handar10.gif` arm, `bowsite.gif` bow); the nocked arrow isn't part of it.
+- **Firing:** `FUN_0046aed0` calls `FUN_005500e0(player DAT_00aa1418, arrow DAT_00aa0f8c, power, 0x204, 0, 0, 0)`.
+  - `FUN_005500e0` launches a projectile: cdecl(launcher, projectile, power, flags, extra velocity*, ?, start point*).
+  - Without a start point it uses the projectile's own position and the launcher's facing. For the player (`FUN_0054ffa0`) the facing is the player camera's angles (`DAT_00aa141c` + 0x14: 16-bit bank, pitch, heading).
+  - Flag 2 would push the start out along the facing with a collision check; the bow doesn't set it.
+- **Nocked arrow:** `DAT_00aa0f8c` (the object fired next).
+- **Model names:** the ModelName property interface at `DAT_00ab00c4`; vtbl 0x54 is Get(this, obj, const char** name), `__stdcall` (as used by `FUN_005bd430`). Arrow models are in `obj.crf` (`arrow.bin`, `arrowfir.bin`, …): along X, head at +X, nock at the min X.
+- **World bow model:** `bow2.bin`, up along Z (tips at ±1.89 ft), handle near Z = 0 on the −Y side; limbs sweep to +Y.
+- **Thief2VR (hands on):** the bow arm is hidden and `bow2.bin` is drawn in the bow hand with a string and the nocked arrow's model. The launcher is hooked: the player's nocked arrow starts at the drawn arrow's centre, and the camera angles are set to its direction for the call.
 
 ### Sound listener
 - NewDark's sound driver is a DirectSound3D-style interface on OpenAL. The OpenAL entry points are resolved by name in `FUN_006aa0c0`: `alListener3f` → `DAT_00a9b978`, `alListenerfv` → `DAT_00a9ca1c`.

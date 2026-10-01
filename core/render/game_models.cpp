@@ -349,6 +349,12 @@ bool LoadTexture(const std::string& crf, const std::string& name, Texture& out)
 
 }  // namespace
 
+bool DecodeImage(const void* data, size_t size, Texture& out)
+{
+    std::vector<unsigned char> file(static_cast<const unsigned char*>(data), static_cast<const unsigned char*>(data) + size);
+    return DecodeImage(file, out);
+}
+
 bool Load(const char* name, Model& out)
 {
     std::string crf = GameDir() + "RES\\obj.crf";

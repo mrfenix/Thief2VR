@@ -50,6 +50,11 @@ bool TrackedAngles(const XrQuaternionf& orientation, float& heading, float& pitc
 // The same for a direction (LOCAL space), e.g. from one hand to the other.
 bool TrackedDirectionAngles(const XrVector3f& direction, float& heading, float& pitch);
 
+// The bow's arrow direction as heading (relative to the tracking forward) and
+// pitch (positive = down), while it aims the body: drawing, just released, or
+// held one-handed. False otherwise.
+bool StereoBowAim(float& heading, float& pitch);
+
 // Converts a tracked point (LOCAL space, metres) into an offset from the game
 // camera in engine world axes (feet), using the same mapping as the rendered
 // eyes. world_yaw is the view's world yaw (EngineWorldYaw).

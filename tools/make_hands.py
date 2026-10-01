@@ -10,9 +10,14 @@ per side for the mod's hands, as fingerless leather gloves.
 - Per vertex: position, normal, UV, 4 joints + weights, and how much it is bare
   skin (the fingers beyond the glove, from the finger joints it follows) vs
   leather glove.
-- A small generated leather-grain texture (greyscale), used through the UVs.
 - GRID > 0 would cluster vertices into a low-poly mesh (off: it fused fingers).
 Everything stays in the model's space (metres, glTF axes); the mod places it.
+
+Also bakes each hand's texture, core/render/hand_{left,right}.png (embedded in
+the DLL as resources): the Hafnia Hands skin albedo (third_party/hafnia-hands,
+MIT, Copyright (c) 2021 Aske Mottelson; made for this hand mesh's UV layout),
+with the glove area turned into black leather that keeps the skin's creases.
+Needs Pillow and numpy for the bake.
 
 Usage: python tools/make_hands.py
 """
@@ -24,6 +29,9 @@ import struct
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'third_party', 'generic-hand')
 OUT = os.path.join(ROOT, 'core', 'render', 'hand_model_data.h')
+SKIN = os.path.join(ROOT, 'third_party', 'hafnia-hands', 'Skin2-Albedo.png')
+TEXTURE_OUT = os.path.join(ROOT, 'core', 'render', 'hand_%s.png')
+TEXTURE_SIZE = 1024
 GRID = 0.0  # metres (0 = full detail)
 
 FINGERS = ['index-finger', 'middle-finger', 'ring-finger', 'pinky-finger']
@@ -205,7 +213,7 @@ def convert(side):
         total = sum(weights) or 1.0
         weights = [w / total for w in weights]
         skin = sum(w * skin_amount.get(j, 0.0) for j, w in zip(joints, weights))
-        verts.append((centre, list(nrm[rep]), list(uvs[rep]), joints, weights, 1.0 if skin > 0.5 else 0.0))
+        verts.append((centre, list(nrm[rep]), list(uvs[rep]), joints, weights, 1.0 if skin > 0.5 else 0.0, skin))
         for m in members:
             vmap[m] = len(verts) - 1
     tris, seen = [], set()
@@ -223,39 +231,123 @@ def convert(side):
     return rest, inv_bind, axes, verts, tris
 
 
-def leather_texture(size=64):
-    """A tiling greyscale leather grain (0..255): soft pebbles plus fine noise."""
-    import random
-    rnd = random.Random(7)
-    cells = 9
-    points = [[(rnd.random(), rnd.random()) for _ in range(cells)] for _ in range(cells)]
-    lattice = [[rnd.random() for _ in range(16)] for _ in range(16)]
+# Where the gloves end: across each finger's first bone (proximal phalanx), this
+# far from the knuckle towards the middle joint; the thumb's, this far along its
+# first bone towards its last joint.
+GLOVE_END_FINGER = 0.7
+GLOVE_END_THUMB = 0.85
+HEM_WIDTH = 0.0035  # metres: the darker rolled hem just inside the glove's edge
 
-    def value_noise(u, v):
-        x, y = u * 16, v * 16
-        x0, y0 = int(x) % 16, int(y) % 16
-        fx, fy = x - int(x), y - int(y)
-        fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
-        a, b = lattice[y0][x0], lattice[y0][(x0 + 1) % 16]
-        c, d = lattice[(y0 + 1) % 16][x0], lattice[(y0 + 1) % 16][(x0 + 1) % 16]
-        return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy
 
-    out = []
-    for py in range(size):
-        for px in range(size):
-            u, v = px / size, py / size
-            cx, cy = int(u * cells), int(v * cells)
-            best = 9.0
-            for oy in (-1, 0, 1):
-                for ox in (-1, 0, 1):
-                    gx, gy = (cx + ox) % cells, (cy + oy) % cells
-                    fx, fy = points[gy][gx]
-                    qx, qy = (cx + ox + fx) / cells, (cy + oy + fy) / cells
-                    best = min(best, math.hypot(u - qx, v - qy) * cells)
-            pebble = 1.0 - 0.28 * min(1.0, best * 1.3) ** 2
-            g = pebble * (0.85 + 0.15 * value_noise(u, v)) * (0.94 + 0.06 * rnd.random())
-            out.append(max(0, min(255, int(g * 255))))
-    return size, out
+def finger_of(joint):
+    """0 = thumb, 1..4 = index..pinky, None = the wrist."""
+    return None if joint == 0 else (0 if joint <= 4 else 1 + (joint - 5) // 5)
+
+
+def bake_texture(side, verts, tris, rest):
+    """The hand's texture: skin where the fingers are bare, black leather over
+    the glove (the skin's shading kept as the leather's creases). The glove
+    ends in a clean ring around each finger: each texel's point on the hand
+    (rest pose) is tested against a cut plane across the finger it belongs to
+    (its triangle's most weighted joint), anti-aliased over about a texel."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    n = TEXTURE_SIZE
+    albedo = np.asarray(Image.open(SKIN).convert('RGB').resize((n, n), Image.LANCZOS), dtype=np.float32) / 255.0
+
+    def joint_pos(name):
+        m = rest[JOINTS.index(name)]
+        return np.array([m[0][3], m[1][3], m[2][3]], dtype=np.float64)
+
+    # The cut plane per finger: a point and the bone's direction (towards the tip).
+    cuts = []
+    for f, name in enumerate(['thumb'] + [x[:-len('-finger')] for x in FINGERS]):
+        if f == 0:
+            a_, b_, frac = joint_pos('thumb-phalanx-proximal'), joint_pos('thumb-phalanx-distal'), GLOVE_END_THUMB
+        else:
+            finger = FINGERS[f - 1]
+            a_, b_ = joint_pos(finger + '-phalanx-proximal'), joint_pos(finger + '-phalanx-intermediate')
+            frac = GLOVE_END_FINGER
+        d = (b_ - a_) / np.linalg.norm(b_ - a_)
+        cuts.append((a_ + (b_ - a_) * frac, d))
+
+    # Per texel: signed distance past the cut (metres; + = bare), and the
+    # texel's size on the hand for anti-aliasing (NaN = not covered).
+    dist = np.full((n, n), np.nan, dtype=np.float32)
+    texel = np.full((n, n), np.nan, dtype=np.float32)
+    ys, xs = np.mgrid[0:n, 0:n]
+    px, py = xs + 0.5, ys + 0.5
+    for a, b, c in tris:
+        p = [(verts[i][2][0] * n, verts[i][2][1] * n) for i in (a, b, c)]
+        x0, x1 = int(max(0, min(q[0] for q in p) - 1)), int(min(n, max(q[0] for q in p) + 2))
+        y0, y1 = int(max(0, min(q[1] for q in p) - 1)), int(min(n, max(q[1] for q in p) + 2))
+        if x0 >= x1 or y0 >= y1:
+            continue
+        (ax, ay), (bx, by), (cx, cy) = p
+        det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        if abs(det) < 1e-9:
+            continue
+        # Its finger: the most weighted joint of its vertices.
+        best, joint = -1.0, 0
+        for i in (a, b, c):
+            for j, w in zip(verts[i][3], verts[i][4]):
+                if w > best:
+                    best, joint = w, j
+        f = finger_of(joint)
+        P = [np.array(verts[i][0], dtype=np.float64) for i in (a, b, c)]
+        if f is None:
+            d3 = [-1.0, -1.0, -1.0]  # the wrist: glove
+        else:
+            point, axis = cuts[f]
+            d3 = [float(np.dot(q - point, axis)) for q in P]
+        area3 = np.linalg.norm(np.cross(P[1] - P[0], P[2] - P[0])) * 0.5
+        size = float(np.sqrt(area3 / max(abs(det) * 0.5, 1e-9)))  # metres per texel
+        sx, sy = px[y0:y1, x0:x1], py[y0:y1, x0:x1]
+        w0 = ((by - cy) * (sx - cx) + (cx - bx) * (sy - cy)) / det
+        w1 = ((cy - ay) * (sx - cx) + (ax - cx) * (sy - cy)) / det
+        w2 = 1 - w0 - w1
+        inside = (w0 >= -0.02) & (w1 >= -0.02) & (w2 >= -0.02)
+        dist[y0:y1, x0:x1][inside] = (w0 * d3[0] + w1 * d3[1] + w2 * d3[2])[inside]
+        texel[y0:y1, x0:x1][inside] = size
+
+    covered = ~np.isnan(dist)
+    e = np.where(covered, texel, 1.0) * 0.75
+    t = np.clip((np.where(covered, dist, -1.0) + e) / (2 * e), 0, 1)
+    bare = t * t * (3 - 2 * t)
+    inner = np.where(covered, -dist, 1.0)  # distance inside the glove
+    hem = np.where((inner > 0) & (inner < HEM_WIDTH), np.sin(np.clip(inner / HEM_WIDTH, 0, 1) * np.pi), 0.0)
+
+    # Past the layout's edges: grow the covered values outwards (so filtering
+    # and mip levels don't pull in the wrong material).
+    def grow(values):
+        values = np.where(covered, values, 0).astype(np.float32)
+        weight = covered.astype(np.float32)
+        for _ in range(24):
+            g = np.asarray(Image.fromarray(values * 255).filter(ImageFilter.MaxFilter(3)), dtype=np.float32) / 255
+            w = np.asarray(Image.fromarray(weight * 255).filter(ImageFilter.MaxFilter(3)), dtype=np.float32) / 255
+            fill = (weight == 0) & (w > 0)
+            values[fill] = g[fill]
+            weight = np.maximum(weight, w)
+        return values
+    bare, hem = grow(bare), grow(hem)
+
+    # Leather: the skin's shading relative to its local average (creases,
+    # knuckles), on a near-black brown, with a faint fine grain.
+    lum = albedo @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    local = np.asarray(Image.fromarray((lum * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(24)),
+                       dtype=np.float32) / 255 + 1e-3
+    detail = np.clip(lum / local, 0.55, 1.4) ** 1.6
+    rnd = np.random.default_rng(7)
+    grain = np.asarray(Image.fromarray((rnd.random((n, n)) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)),
+                       dtype=np.float32) / 255
+    base = np.array([0.13, 0.117, 0.108], dtype=np.float32)
+    leather = base[None, None, :] * (detail * (0.85 + 0.3 * grain) * (1 - 0.5 * hem))[:, :, None]
+
+    out = albedo * bare[:, :, None] + leather * (1 - bare[:, :, None])
+    img = Image.fromarray(np.clip(out * 255 + 0.5, 0, 255).astype(np.uint8), 'RGB')
+    img.save(TEXTURE_OUT % side, optimize=True)
+    print('wrote', TEXTURE_OUT % side)
 
 
 def c_floats(values):
@@ -287,21 +379,14 @@ def main():
         lines.append('constexpr float k%sVertices[][17] = {' % s)
         lines += ['    {%s, %s, %s, %s, %s, %.1ff},' % (c_floats(p), c_floats(n), c_floats(uv),
                                                   ', '.join('%d.0f' % j for j in js), c_floats(ws), sk)
-                  for p, n, uv, js, ws, sk in verts]
+                  for p, n, uv, js, ws, sk, _ in verts]
         lines.append('};')
         lines.append('constexpr int k%sTriangleCount = %d;' % (s, len(tris)))
         lines.append('constexpr unsigned short k%sTriangles[][3] = {' % s)
         lines += ['    {%d, %d, %d},' % t for t in tris]
         lines.append('};')
         lines.append('')
-    size, grain = leather_texture()
-    lines.append('// Leather grain, %dx%d greyscale, tiling.' % (size, size))
-    lines.append('constexpr int kGrainSize = %d;' % size)
-    lines.append('constexpr unsigned char kGrain[] = {')
-    for i in range(0, len(grain), 32):
-        lines.append('    ' + ', '.join(str(g) for g in grain[i:i + 32]) + ',')
-    lines.append('};')
-    lines.append('')
+        bake_texture(side, verts, tris, rest)
     lines.append('}  // namespace hand_model')
     open(OUT, 'w', newline='\n').write('\n'.join(lines) + '\n')
     print('wrote', OUT)

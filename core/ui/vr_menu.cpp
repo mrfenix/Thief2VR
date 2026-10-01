@@ -177,7 +177,8 @@ void ControlsTab()
         {"Hold Y", "Objectives"},
         {"Left menu button", "Tap: game menu. Hold: this VR menu"},
         {"Crouch / lean with your body", "Crouch / lean in the game"},
-        {"Two-handed bow (Hands tab)", "Bow in the left hand; squeeze the right grip at the bow, pull back, let go"},
+        {"Bow (two-handed, default)", "Bow in the left hand; squeeze the right grip at the bow, pull back, let go"},
+        {"Bow (one-handed, Hands tab)", "Bow in the right hand; hold the right trigger to draw, release to fire"},
         {"Game menus, map, books", "Point with the right hand, trigger = click, B = back"},
         {"Keyboard", "F7 desktop mirror, F8 recenter, F10 this menu"},
     };
