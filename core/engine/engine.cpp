@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <MinHook.h>
+#include <dsound.h>
 #include <intrin.h>
 #include <cstring>
 
@@ -490,7 +491,6 @@ namespace {
 void* g_weapon_update_trampoline;
 void* g_sphere_set_trampoline;
 int g_player_weapon_in_update;  // weapon obj while the player's arm is placing its spheres, else 0
-int g_strike_updates, g_strike_sphere_calls;  // diagnostics: the arm's weapon updates / any sphere placement
 WeaponPointTransform g_weapon_transform;
 
 // Snapshot of the arm's last weapon update (for the F12 dump / logging).
@@ -564,7 +564,6 @@ bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int w
         return original(creature, nullptr, weapon, index);
 
     SnapshotArmWeapon(creature, weapon, index);
-    ++g_strike_updates;
     ++g_arm_update_count;
     if (WeaponIndexOf(weapon) != index) {
         static int next;
@@ -579,30 +578,15 @@ bool __fastcall WeaponUpdateDetour(unsigned char* creature, void* /*edx*/, int w
     return result;
 }
 
-// Diagnostics for the open hit window (see EngineMeleeStrike).
-ULONGLONG g_strike_opened;
-int g_strike_placements;
-float g_strike_near = 1e9f, g_strike_far;
-int g_strike_events;
-
 void __cdecl TransformWeaponPoint(float* point)
 {
     if (g_weapon_transform)
         g_weapon_transform(point);
-    if (int* cam = *g_engine.current_camera) {
-        const float* c = reinterpret_cast<const float*>(cam + 2);
-        float dx = point[0] - c[0], dy = point[1] - c[1], dz = point[2] - c[2];
-        float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-        ++g_strike_placements;
-        g_strike_near = std::fmin(g_strike_near, d);
-        g_strike_far = std::fmax(g_strike_far, d);
-    }
 }
 
 __declspec(naked) void SphereSetDetour()
 {
     __asm {
-        inc dword ptr [g_strike_sphere_calls]
         mov eax, [esp + 4]  // object
         test eax, eax
         je passthrough
@@ -771,10 +755,8 @@ void __cdecl OnDamageCall(int slot, int victim, int culprit)
 {
     if (!g_melee_weapon || GetTickCount64() > g_melee_until)
         return;
-    if (culprit == g_melee_weapon || victim == g_melee_weapon) {
+    if (culprit == g_melee_weapon || victim == g_melee_weapon)
         g_melee_events |= slot == 4 ? kMeleeHitDamage : kMeleeHitImpact;
-        g_strike_events |= slot == 4 ? kMeleeHitDamage : kMeleeHitImpact;
-    }
 }
 
 // Arity-agnostic: reads victim/culprit, then continues into the original.
@@ -924,10 +906,197 @@ int __stdcall ListenerOrientationDetour(void* self, const float* front, const fl
     return reinterpret_cast<int(__stdcall*)(void*, const float*, const float*)>(g_listener_ori_tramp)(self, front,
                                                                                                         top);
 }
+
+// --- DirectSound (NewDark's other sound driver) ---
+// With DirectSound the game sets the DirectSound3D listener to the player
+// camera (which turns with the aiming hand) and plays most sounds head-relative
+// (DS3DMODE_HEADRELATIVE) in the camera's frame. As for OpenAL above, the
+// listener goes to the head and head-relative positions are re-expressed in
+// the head's frame. DirectSound's own methods are hooked (their addresses from
+// a throwaway DirectSound object), so NewDark's driver code isn't needed.
+// DirectSound axes: x right, y up, z forward (engine: x forward, y left, z up).
+Vec3 ToDs(Vec3 e)
+{
+    return {-e.y, e.z, e.x};
+}
+Vec3 FromDs(Vec3 d)
+{
+    return {d.z, -d.x, d.y};
+}
+float g_ds_scale = 1.0f;  // DirectSound units per foot (from the first listener position)
+bool g_ds_scale_known;
+
+using DsSetVector = HRESULT(__stdcall*)(void*, float, float, float, DWORD);
+using DsSetOrientation = HRESULT(__stdcall*)(void*, float, float, float, float, float, float, DWORD);
+using DsGetMode = HRESULT(__stdcall*)(void*, DWORD*);
+using DsSetListenerAll = HRESULT(__stdcall*)(void*, const DS3DLISTENER*, DWORD);
+using DsSetBufferAll = HRESULT(__stdcall*)(void*, const DS3DBUFFER*, DWORD);
+DsSetVector g_ds_listener_pos_tramp, g_ds_buffer_pos_tramp;
+DsSetOrientation g_ds_listener_ori_tramp;
+DsSetListenerAll g_ds_listener_all_tramp;
+DsSetBufferAll g_ds_buffer_all_tramp;
+DsGetMode g_ds_buffer_get_mode;
+
+// The listener at the head: the game's position (the camera) moved by head - camera.
+bool DsHeadListener(Vec3& pos)
+{
+    int* cam = *g_engine.current_camera;
+    if (!cam || GetTickCount64() > g_head_until)
+        return false;
+    const float* c = reinterpret_cast<const float*>(cam + 2);
+    Vec3 camera{c[0], c[1], c[2]};
+    if (!g_ds_scale_known) {
+        Vec3 camera_ds = ToDs(camera);
+        float len2 = Dot(camera_ds, camera_ds);
+        float s = len2 > 1.0f ? Dot(pos, camera_ds) / len2 : 1.0f;
+        g_ds_scale = s > 0.2f && s < 5.0f ? s : 1.0f;
+        g_ds_scale_known = true;
+        Log("Sound: DirectSound listener at (%.2f %.2f %.2f) for the camera at (%.2f %.2f %.2f): %.3f units per foot",
+            pos.x, pos.y, pos.z, c[0], c[1], c[2], g_ds_scale);
+    }
+    pos = pos + ToDs(Vec3{g_head_pos[0], g_head_pos[1], g_head_pos[2]} - camera) * g_ds_scale;
+    return true;
+}
+
+bool DsHeadRelative(void* buffer, DWORD mode, Vec3& pos)
+{
+    if (mode != DS3DMODE_HEADRELATIVE || GetTickCount64() > g_head_until)
+        return false;
+    Vec3 p = FromDs(pos) * (1.0f / g_ds_scale);
+    const float in[3] = {p.x, p.y, p.z};
+    float out[3];
+    if (!HeadRelativePosition(in, out))
+        return false;
+    pos = ToDs(Vec3{out[0], out[1], out[2]}) * g_ds_scale;
+    return true;
+}
+
+HRESULT __stdcall DsListenerPositionDetour(void* self, float x, float y, float z, DWORD apply)
+{
+    Vec3 p{x, y, z};
+    DsHeadListener(p);
+    return g_ds_listener_pos_tramp(self, p.x, p.y, p.z, apply);
+}
+
+HRESULT __stdcall DsListenerOrientationDetour(void* self, float fx, float fy, float fz, float tx, float ty, float tz,
+                                              DWORD apply)
+{
+    if (GetTickCount64() <= g_head_until) {
+        Vec3 f = ToDs({g_head_front[0], g_head_front[1], g_head_front[2]});
+        Vec3 t = ToDs({g_head_top[0], g_head_top[1], g_head_top[2]});
+        fx = f.x, fy = f.y, fz = f.z, tx = t.x, ty = t.y, tz = t.z;
+    }
+    return g_ds_listener_ori_tramp(self, fx, fy, fz, tx, ty, tz, apply);
+}
+
+HRESULT __stdcall DsListenerAllDetour(void* self, const DS3DLISTENER* params, DWORD apply)
+{
+    if (!params || GetTickCount64() > g_head_until)
+        return g_ds_listener_all_tramp(self, params, apply);
+    DS3DLISTENER l = *params;
+    Vec3 p{l.vPosition.x, l.vPosition.y, l.vPosition.z};
+    if (DsHeadListener(p))
+        l.vPosition = {p.x, p.y, p.z};
+    Vec3 f = ToDs({g_head_front[0], g_head_front[1], g_head_front[2]});
+    Vec3 t = ToDs({g_head_top[0], g_head_top[1], g_head_top[2]});
+    l.vOrientFront = {f.x, f.y, f.z};
+    l.vOrientTop = {t.x, t.y, t.z};
+    return g_ds_listener_all_tramp(self, &l, apply);
+}
+
+HRESULT __stdcall DsBufferPositionDetour(void* self, float x, float y, float z, DWORD apply)
+{
+    DWORD mode = 0;
+    Vec3 p{x, y, z};
+    if (g_ds_buffer_get_mode && SUCCEEDED(g_ds_buffer_get_mode(self, &mode)))
+        DsHeadRelative(self, mode, p);
+    return g_ds_buffer_pos_tramp(self, p.x, p.y, p.z, apply);
+}
+
+HRESULT __stdcall DsBufferAllDetour(void* self, const DS3DBUFFER* params, DWORD apply)
+{
+    if (!params)
+        return g_ds_buffer_all_tramp(self, params, apply);
+    DS3DBUFFER b = *params;
+    Vec3 p{b.vPosition.x, b.vPosition.y, b.vPosition.z};
+    if (DsHeadRelative(self, b.dwMode, p))
+        b.vPosition = {p.x, p.y, p.z};
+    return g_ds_buffer_all_tramp(self, &b, apply);
+}
+
+void InstallDirectSoundHooks()
+{
+    // IID_IDirectSound3DListener / IID_IDirectSound3DBuffer
+    static const GUID kListener = {0x279afa84, 0x4981, 0x11ce, {0xa5, 0x21, 0x00, 0x20, 0xaf, 0x0b, 0xe5, 0x60}};
+    static const GUID kBuffer3d = {0x279afa86, 0x4981, 0x11ce, {0xa5, 0x21, 0x00, 0x20, 0xaf, 0x0b, 0xe5, 0x60}};
+    HMODULE dll = LoadLibraryA("dsound.dll");
+    auto create = dll ? reinterpret_cast<HRESULT(WINAPI*)(LPCGUID, LPDIRECTSOUND8*, LPUNKNOWN)>(
+                            GetProcAddress(dll, "DirectSoundCreate8"))
+                      : nullptr;
+    IDirectSound8* ds = nullptr;
+    if (!create || FAILED(create(nullptr, &ds, nullptr))) {
+        Log("Engine: DirectSound unavailable; its sound stays relative to the body");
+        return;
+    }
+    IDirectSoundBuffer *primary = nullptr, *secondary = nullptr;
+    IDirectSound3DListener* listener = nullptr;
+    IDirectSound3DBuffer* buffer = nullptr;
+    ds->SetCooperativeLevel(GetDesktopWindow(), DSSCL_PRIORITY);
+    DSBUFFERDESC pd{};
+    pd.dwSize = sizeof(pd);
+    pd.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D;
+    if (SUCCEEDED(ds->CreateSoundBuffer(&pd, &primary, nullptr)))
+        primary->QueryInterface(kListener, reinterpret_cast<void**>(&listener));
+    WAVEFORMATEX fmt{WAVE_FORMAT_PCM, 1, 22050, 44100, 2, 16, 0};
+    DSBUFFERDESC sd{};
+    sd.dwSize = sizeof(sd);
+    sd.dwFlags = DSBCAPS_CTRL3D;
+    sd.dwBufferBytes = 4096;
+    sd.lpwfxFormat = &fmt;
+    if (SUCCEEDED(ds->CreateSoundBuffer(&sd, &secondary, nullptr)))
+        secondary->QueryInterface(kBuffer3d, reinterpret_cast<void**>(&buffer));
+    MH_STATUS st = MH_ERROR_NOT_INITIALIZED;
+    if (listener && buffer) {
+        // IDirectSound3DListener: 10 SetAllParameters, 13 SetOrientation, 14 SetPosition.
+        // IDirectSound3DBuffer: 9 GetMode, 12 SetAllParameters, 19 SetPosition.
+        void** lv = *reinterpret_cast<void***>(listener);
+        void** bv = *reinterpret_cast<void***>(buffer);
+        g_ds_buffer_get_mode = reinterpret_cast<DsGetMode>(bv[9]);
+        struct {
+            void* target;
+            void* detour;
+            void** tramp;
+        } hooks[] = {
+            {lv[14], reinterpret_cast<void*>(&DsListenerPositionDetour), reinterpret_cast<void**>(&g_ds_listener_pos_tramp)},
+            {lv[13], reinterpret_cast<void*>(&DsListenerOrientationDetour), reinterpret_cast<void**>(&g_ds_listener_ori_tramp)},
+            {lv[10], reinterpret_cast<void*>(&DsListenerAllDetour), reinterpret_cast<void**>(&g_ds_listener_all_tramp)},
+            {bv[19], reinterpret_cast<void*>(&DsBufferPositionDetour), reinterpret_cast<void**>(&g_ds_buffer_pos_tramp)},
+            {bv[12], reinterpret_cast<void*>(&DsBufferAllDetour), reinterpret_cast<void**>(&g_ds_buffer_all_tramp)},
+        };
+        st = MH_OK;
+        for (auto& h : hooks)
+            if (st == MH_OK)
+                st = MH_CreateHook(h.target, h.detour, h.tramp);
+        for (auto& h : hooks)
+            if (st == MH_OK)
+                st = MH_EnableHook(h.target);
+    }
+    if (buffer)
+        buffer->Release();
+    if (secondary)
+        secondary->Release();
+    if (listener)
+        listener->Release();
+    if (primary)
+        primary->Release();
+    ds->Release();
+    Log("Engine: DirectSound listener / source hooks %s", MH_StatusToString(st));
+}
 } // namespace
 
 static void InstallListenerHooks()
 {
+    InstallDirectSoundHooks();
     unsigned char* set_pos = g_base + 0x2ac700;
     unsigned char* set_ori = g_base + 0x2ac7b0;
     if (!Matches(set_pos, "8b 44 24 08 8b 08 56 8b 74 24 08 83 be 45 01 00 00 00") ||
@@ -971,7 +1140,6 @@ void EngineClearListenerPose()
 }
 
 static unsigned char* CreatureOf(int obj);
-int g_strike_self_updates;
 
 int EngineTakeMeleeHits()
 {
@@ -988,10 +1156,8 @@ int EngineTakeMeleeHits()
     if (g_strike_weapon && !g_strike_stopped && g_arm_update_count == seen_updates) {
         unsigned char* creature = CreatureOf(g_strike_arm);
         int index = WeaponIndexOf(g_strike_weapon);
-        if (creature && index >= 0) {
-            ++g_strike_self_updates;
+        if (creature && index >= 0)
             WeaponUpdateDetour(creature, nullptr, g_strike_weapon, index);
-        }
     }
     seen_updates = g_arm_update_count;
     int events = g_melee_events;
@@ -1009,29 +1175,8 @@ bool EngineMeleeStrike(bool open)
     if (!g_vr_melee || !g_player_object)
         return false;
     if (!open) {
-        if (g_strike_weapon) {
-            bool physical = g_get_phys_model && g_get_phys_model(g_strike_weapon);
+        if (g_strike_weapon)
             CallCreatureWeapon(g_weapon_off_fn, g_strike_arm, g_strike_weapon);
-            // Diagnostics: this strike, and each weapon's hit spheres once.
-            if (g_strike_stopped)
-                g_strike_events |= kMeleeHitWall;
-            Log("Melee: strike %llu ms, %d arm weapon updates (%d by Thief2VR), %d sphere sets (any), weapon %s, "
-                "%d sphere placements at %.1f-%.1f ft, hits:%s%s%s%s",
-                GetTickCount64() - g_strike_opened, g_strike_updates, g_strike_self_updates, g_strike_sphere_calls,
-                physical ? "physical" : "not physical",
-                g_strike_placements, g_strike_placements ? g_strike_near : 0.0f,
-                g_strike_far, g_strike_events & kMeleeHitDamage ? " damage" : "",
-                g_strike_events & kMeleeHitImpact ? " impact" : "", g_strike_events & kMeleeHitWall ? " wall" : "",
-                g_strike_events ? "" : " none");
-            static int logged_weapon[2];
-            const ArmWeaponState& a = g_arm_weapon;
-            if (a.valid && a.weapon == g_strike_weapon && logged_weapon[0] != a.weapon && logged_weapon[1] != a.weapon) {
-                logged_weapon[logged_weapon[0] ? 1 : 0] = a.weapon;
-                for (int i = 0; i < a.spheres; ++i)
-                    Log("Melee: weapon %d hit sphere %d: joints %d-%d t %.2f radius %.2f ft", a.weapon, i, a.joint_a[i],
-                        a.joint_b[i], a.t[i], a.radius[i]);
-            }
-        }
         g_strike_arm = g_strike_weapon = 0;
         if (g_end_attack_pending && g_end_attack_tramp) {
             g_end_attack_pending = false;
@@ -1051,25 +1196,13 @@ bool EngineMeleeStrike(bool open)
     int released = *reinterpret_cast<int*>(g_base + 0x490f94);  // DAT_00890f94
     int arm = EngineArmObject();
     int weapon = CallCurWeapon(*g_player_object);
-    if (!released || !arm || weapon <= 0) {
-        // E.g. the game refused the attack (still recovering from the last one).
-        int* limb_state = *reinterpret_cast<int**>(g_base + 0x6a1444);  // DAT_00aa1444
-        Log("Melee: no hit window (released %d, ready %d, winding %d, swinging %d, arm state %d, arm %d, weapon %d)",
-            released, *reinterpret_cast<int*>(g_base + 0x490f8c), *reinterpret_cast<int*>(g_base + 0x490f9c),
-            *reinterpret_cast<int*>(g_base + 0x490f98), limb_state ? limb_state[0x24 / 4] : -1, arm, weapon);
-        return false;
-    }
+    if (!released || !arm || weapon <= 0)
+        return false;  // e.g. the game refused the attack (still recovering from the last one)
     InstallHitFeedback();
     CallCreatureWeapon(g_weapon_on_fn, arm, weapon);
     g_strike_arm = arm;
     g_strike_weapon = weapon;
     g_strike_stopped = false;
-    g_strike_opened = GetTickCount64();
-    g_strike_placements = 0;
-    g_strike_updates = g_strike_sphere_calls = g_strike_self_updates = 0;
-    g_strike_near = 1e9f;
-    g_strike_far = 0;
-    g_strike_events = 0;
     g_melee_weapon = weapon;
     g_melee_until = GetTickCount64() + 1500;
     return true;

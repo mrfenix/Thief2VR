@@ -16,7 +16,7 @@ $supported = @{
     'd26342c34624a08a0e5fc8d8c9daf14c676642c328f41c01f548170774aafe8f' = 'NewDark 1.29 (T2Fix 2026-09-16)'
 }
 $modFiles = @('d3d9.dll', 'thief2vr.dll', 'openxr_loader.dll')
-$extKeys = @('force_windowed', 'vsync_mode', 'framerate_cap', 'bob_factor', 'phys_freq', 'use_hi_res_timer')
+$extKeys = @('force_windowed', 'vsync_mode', 'framerate_cap', 'bob_factor', 'phys_freq', 'use_hi_res_timer', 'snd3d')
 $blockStart = '; >>> Thief2VR (added by the Thief2VR installer; removed by its uninstaller)'
 $blockEnd = '; <<< Thief2VR'
 $block = @(
@@ -120,7 +120,18 @@ for ($i = 0; $i -lt $ext.Count; $i++) {
     }
 }
 if ($out.Count -gt 0 -and $out[$out.Count - 1].Trim()) { $out.Add('') }
-foreach ($l in $block) { $out.Add($l) }
+# 3D sound through a provider, not the game's own software mixing (which the
+# mod can't keep at your head): OpenAL if it's installed, else DirectSound3D.
+$systemX86 = [Environment]::GetFolderPath('SystemX86')
+$haveOpenAL = (Test-Path (Join-Path $systemX86 'OpenAL32.dll')) -or (Test-Path (Join-Path $GameDir 'OpenAL32.dll'))
+$snd3d = if ($haveOpenAL) { 'openal' } else { 'a3d' }
+foreach ($l in $block) {
+    if ($l -eq $blockEnd) {
+        $out.Add('; 3D sound through a provider (the mod keeps it at your head, not the aiming hand)')
+        $out.Add("snd3d $snd3d")
+    }
+    $out.Add($l)
+}
 Set-Content -Path $extPath -Value $out -Encoding Default
 Write-Host 'cam_ext.cfg: Thief2VR settings applied.'
 

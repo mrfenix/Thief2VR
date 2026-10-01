@@ -203,17 +203,14 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         // Its speed: from the runtime's velocities if it reports them (v + w x r),
         // otherwise from the movement since last frame.
         float speed = 0;
-        Vec3 tip_velocity{};
         static bool logged_source;
         if (c.velocity_valid[1]) {
             const XrVector3f& v = c.linear_velocity[1];
             const XrVector3f& w = c.angular_velocity[1];
-            tip_velocity = Vec3{v.x + (w.y * r.z - w.z * r.y), v.y + (w.z * r.x - w.x * r.z),
-                                v.z + (w.x * r.y - w.y * r.x)};
-            speed = Length(tip_velocity);
+            speed = Length(Vec3{v.x + (w.y * r.z - w.z * r.y), v.y + (w.z * r.x - w.x * r.z),
+                                v.z + (w.x * r.y - w.y * r.x)});
         } else if (have_last_tip && dt > 0.001) {
-            tip_velocity = (tip - last_tip) * (1.0f / (float)dt);
-            speed = Length(tip_velocity);
+            speed = Length(tip - last_tip) / (float)dt;
         }
         if (!logged_source) {
             logged_source = true;
@@ -228,13 +225,6 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
             // the arm is ready), or the game would refuse this one.
             CloseStrike();
             EngineMeleeReady();
-            {
-                // Diagnostics: the swing's direction relative to where the head faces
-                // (tracking: x right, y up, -z forward).
-                float h = head.track_heading, fwd = -tip_velocity.z, left = -tip_velocity.x;
-                float f2 = std::cos(h) * fwd + std::sin(h) * left, l2 = -std::sin(h) * fwd + std::cos(h) * left;
-                Log("Melee: swing %.1f m/s (right %.1f, up %.1f, forward %.1f)", speed, -l2, tip_velocity.y, f2);
-            }
             swing_hold = 0.001;  // press for one frame, then release = quick swing
             swing_cooldown = 0.4;
             XrControls().Vibrate(1, 0.5f, 0.06f);

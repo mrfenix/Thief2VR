@@ -150,6 +150,8 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - **Thief2VR (hands on):** the bow arm is hidden and `bow2.bin` is drawn in the bow hand with a string and the nocked arrow's model. The launcher is hooked: the player's nocked arrow starts at the drawn arrow's centre, and the camera angles are set to its direction for the call.
 
 ### Sound listener
+- **3D provider:** `DAT_0086f81c` (set in `FUN_00571620` from the config key `snd3d`): `a3d` → 2 (DirectSound3D), `openal` → 4 (OpenAL). Without the key it's the game's own software mixing: 3D sound is panned by NewDark and no listener / 3D source methods are called, so Thief2VR can't move the ears. The installer sets `snd3d openal` (or `a3d` without OpenAL32.dll). The audio options menu (`FUN_0045c960`) shows "OpenAL" / "DirectSound3D" from it.
+- With DirectSound3D, Thief2VR hooks DirectSound's own IDirectSound3DListener (SetPosition, SetOrientation, SetAllParameters) and IDirectSound3DBuffer (SetPosition, SetAllParameters; head-relative buffers) methods, found through a throwaway DirectSound object.
 - NewDark's sound driver is a DirectSound3D-style interface on OpenAL. The OpenAL entry points are resolved by name in `FUN_006aa0c0`: `alListener3f` → `DAT_00a9b978`, `alListenerfv` → `DAT_00a9ca1c`.
 - Listener methods (`__stdcall`, `this` first). Vectors are in engine world space and converted to OpenAL as `(-y, z, -x)`:
   - `0x006ac700` SetPosition(pos), RET 8, sets `AL_POSITION`, scaled by `this+0x13d`;
