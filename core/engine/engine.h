@@ -140,6 +140,11 @@ bool EngineObjectModelName(int obj, char* out, int size);
 // the game's own spot and the camera's facing (valid = false: the game's).
 void EngineSetBowShot(bool valid, const float offset[3], const float dir[3]);
 
+// The inventory display: the canvas size, and per slot (0 weapon, 1 item) its
+// screen rect (x0 y0 x1 y1, canvas pixels), object and hidden flag.
+bool EngineHudLayout(int canvas[2], int rect[2][4], int object[2], int hidden[2]);
+// Diagnostics (F12): logs the inventory display's slot rects and the canvas size.
+void EngineLogHudLayout();
 // The highlighted frob target (DAT_00aa1e08), or 0.
 int EngineFrobTarget();
 // The non-loot object the player is holding (picked up "junk": a bottle, a

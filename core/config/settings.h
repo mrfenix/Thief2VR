@@ -60,6 +60,17 @@
     X(float, physical_lean_ft, 0.58f, 0.1f, 1.5f, "Movement", "Physical lean distance (ft)")                     \
     X(bool, lean_camera_shift, true, 0, 1, "Movement", "Lean adds the game's camera shift (off = view follows only your head)") \
     X(bool, hud_enabled, true, 0, 1, "HUD", "Show HUD (light gem, inventory)")                                  \
+    X(bool, wrist_hud, true, 0, 1, "HUD", "Health, light gem and inventory on your wrists (look at a wrist)")        \
+    X(float, wrist_left_size, 1.0f, 0.3f, 2.5f, "HUD", "Left wrist: size")                                           \
+    X(float, wrist_left_health_size, 0.75f, 0.2f, 1.5f, "HUD", "Left wrist: health size")                             \
+    X(float, wrist_left_rotation_deg, 30.0f, -180.0f, 180.0f, "HUD", "Left wrist: rotation (deg, + counter-clockwise)") \
+    X(float, wrist_left_along_cm, 0.0f, -15.0f, 15.0f, "HUD", "Left wrist: position along the forearm (cm, + to the hand)") \
+    X(float, wrist_left_up_cm, -2.0f, -10.0f, 10.0f, "HUD", "Left wrist: position up / down (cm)")                   \
+    X(float, wrist_right_size, 1.0f, 0.3f, 2.5f, "HUD", "Right wrist: size")                                         \
+    X(float, wrist_right_rotation_deg, -30.0f, -180.0f, 180.0f, "HUD", "Right wrist: rotation (deg, + counter-clockwise)") \
+    X(float, wrist_right_along_cm, 0.0f, -15.0f, 15.0f, "HUD", "Right wrist: position along the forearm (cm, + to the hand)") \
+    X(float, wrist_right_up_cm, -2.0f, -10.0f, 10.0f, "HUD", "Right wrist: position up / down (cm)")                 \
+    X(float, wrist_hud_look_angle, 20.0f, 10.0f, 60.0f, "HUD", "Wrist display: shows within this angle of your view (deg)") \
     X(bool, show_menu_hint, true, 0, 1, "HUD", "Show the VR menu hint when a mission starts")                        \
     X(float, hud_distance, 1.08f, 0.3f, 3.0f, "HUD", "HUD distance (m)")                                         \
     X(float, hud_width, 1.07f, 0.3f, 4.0f, "HUD", "HUD width (m)")                                               \

@@ -1,5 +1,8 @@
 #include "frame_transfer.h"
 
+#include <cstdio>
+#include <cstring>
+
 #include "../log.h"
 
 #include <emmintrin.h>
@@ -70,8 +73,10 @@ bool FrameTransfer::Capture(IDirect3DDevice9* device, IDirect3DSurface9* src)
 }
 
 bool FrameTransfer::Upload(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* dst, bool swizzle_rgba,
-                           bool alpha_from_color)
+                           bool alpha_from_color, TransferCut* cuts, int cut_count, ID3D11Texture2D* cut_dst)
 {
+    for (int i = 0; i < cut_count; ++i)
+        cuts[i].found = false;
     // The slot that Capture wrote last time is the one Capture will write next;
     // upload the older one if it has data, else the newest.
     int read = write_;
@@ -126,7 +131,62 @@ bool FrameTransfer::Upload(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D1
                 d[x] = swizzle_rgba ? (a << 24) | (b << 16) | (g << 8) | r : (a << 24) | (p & 0xffffff);
             }
         }
+        if (dump_path_ && alpha_from_color) {
+            // A top-down 32-bit BMP (BGRA, or RGBA when swizzled).
+            if (FILE* f = fopen(dump_path_, "wb")) {
+                unsigned size = width_ * height_ * 4;
+                unsigned char header[54] = {'B', 'M'};
+                auto put = [&](int at, unsigned v) { memcpy(header + at, &v, 4); };
+                put(2, 54 + size);
+                put(10, 54);
+                put(14, 40);
+                put(18, width_);
+                put(22, (unsigned)-(int)height_);
+                header[26] = 1;
+                header[28] = 32;
+                put(34, size);
+                fwrite(header, 1, 54, f);
+                fwrite(pixels.data(), 1, size, f);
+                fclose(f);
+            }
+            dump_path_ = nullptr;
+        }
         ctx->UpdateSubresource(staging_, 0, nullptr, pixels.data(), width_ * 4, 0);
+        // The cuts: the visible box in each zone to its cell, then the zone cleared.
+        static std::vector<unsigned> zeros;
+        for (int i = 0; alpha_from_color && i < cut_count; ++i) {
+            TransferCut& c = cuts[i];
+            int x0 = max(0, c.zone[0]), y0 = max(0, c.zone[1]);
+            int x1 = min((int)width_, c.zone[2]), y1 = min((int)height_, c.zone[3]);
+            if (x0 >= x1 || y0 >= y1)
+                continue;
+            int bx0 = x1, by0 = y1, bx1 = x0, by1 = y0;
+            for (int y = y0; y < y1; ++y) {
+                const unsigned* row = pixels.data() + (size_t)y * width_;
+                for (int x = x0; x < x1; ++x)
+                    if ((row[x] >> 24) > 24) {
+                        bx0 = min(bx0, x), bx1 = max(bx1, x + 1);
+                        by0 = min(by0, y), by1 = max(by1, y + 1);
+                    }
+            }
+            if (bx0 < bx1 && by0 < by1 && cut_dst) {
+                bx1 = min(bx1, bx0 + c.cell[2]);
+                by1 = min(by1, by0 + c.cell[3]);
+                D3D11_BOX box{(UINT)bx0, (UINT)by0, 0, (UINT)bx1, (UINT)by1, 1};
+                ctx->CopySubresourceRegion(cut_dst, 0, c.cell[0], c.cell[1], 0, staging_, 0, &box);
+                c.found = true;
+                c.box[0] = bx0, c.box[1] = by0, c.box[2] = bx1, c.box[3] = by1;
+            }
+            if (c.clear[2] > c.clear[0] && c.clear[3] > c.clear[1]) {
+                x0 = max(0, c.clear[0]), y0 = max(0, c.clear[1]);
+                x1 = min((int)width_, c.clear[2]), y1 = min((int)height_, c.clear[3]);
+                if (x0 >= x1 || y0 >= y1)
+                    continue;
+            }
+            zeros.assign((size_t)(x1 - x0) * (y1 - y0), 0);
+            D3D11_BOX zone{(UINT)x0, (UINT)y0, 0, (UINT)x1, (UINT)y1, 1};
+            ctx->UpdateSubresource(staging_, 0, &zone, zeros.data(), (x1 - x0) * 4, 0);
+        }
     } else {
         ctx->UpdateSubresource(staging_, 0, nullptr, lr.pBits, lr.Pitch, 0);
     }

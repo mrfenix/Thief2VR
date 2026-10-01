@@ -6,6 +6,7 @@
 #include "input/vr_controls.h"
 #include "log.h"
 #include "ui/vr_menu.h"
+#include "ui/wrist_hud.h"
 
 #include <cstdio>
 #include "xr/xr_input.h"
@@ -54,7 +55,10 @@ struct FlatLayer {
     IDirect3DSurface9* scaled = nullptr;  // GPU-downscaled copy when capture_scale < 1
 
     // capture_scale < 1 captures a smaller, GPU-filtered copy (cheaper readback).
-    bool Update(IDirect3DDevice9* device, bool should_render, bool alpha_from_color, float capture_scale = 1.0f)
+    // wrist (the HUD): its elements are cut into the wrist atlas (wrist_hud), and
+    // what was found kept in wrist_cuts.
+    bool Update(IDirect3DDevice9* device, bool should_render, bool alpha_from_color, float capture_scale = 1.0f,
+                XrSwapchainD3D11* wrist = nullptr, TransferCut* wrist_cuts = nullptr)
     {
         IDirect3DSurface9* back = nullptr;
         if (FAILED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)))
@@ -87,9 +91,24 @@ struct FlatLayer {
 
         if (should_render && swapchain.IsValid() && transfer.width() == w && transfer.height() == h) {
             if (ID3D11Texture2D* image = swapchain.Acquire()) {
+                TransferCut cuts[wrist_hud::kCuts];
+                ID3D11Texture2D* atlas = nullptr;
+                if (wrist && wrist_cuts && wrist_hud::PrepareCuts((int)w, (int)h, cuts)) {
+                    EnsureSwapchain(*wrist, wrist_hud::kAtlasWidth, wrist_hud::kAtlasHeight);
+                    if (wrist->IsValid())
+                        atlas = wrist->Acquire();
+                }
                 if (transfer.Upload(Xr().device(), Xr().context(), image, Xr().color_format_is_rgba(),
-                                    alpha_from_color))
+                                    alpha_from_color, atlas ? cuts : nullptr, atlas ? wrist_hud::kCuts : 0, atlas)) {
                     has_image = true;
+                    for (int i = 0; wrist_cuts && i < wrist_hud::kCuts; ++i)
+                        if (atlas)
+                            wrist_cuts[i] = cuts[i];
+                        else
+                            wrist_cuts[i].found = false;
+                }
+                if (atlas)
+                    wrist->Release();
                 swapchain.Release();
             }
         }
@@ -133,6 +152,10 @@ float g_screen_placed_distance;
 // "Continue" on a menu, so the click doesn't also swing the weapon).
 bool g_suppress_trigger;
 FlatLayer g_hud;     // overlays only, drawn over black by the game
+// The HUD elements moved onto the wrists (wrist_hud): their atlas, and what the
+// last HUD upload found.
+XrSwapchainD3D11 g_wrist_atlas;
+TransferCut g_wrist_cuts[wrist_hud::kCuts];
 
 // Stereo eyes.
 // Shared path (D3D9Ex): the eye textures are opened in D3D11 and copied into
@@ -379,8 +402,12 @@ bool VrOnPresent(IDirect3DDevice9* device)
 
     static bool f12_was_down;
     bool f12_down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-    if (f12_down && !f12_was_down)
+    if (f12_down && !f12_was_down) {
         StereoRequestArmDump();
+        EngineLogHudLayout();
+        g_hud.transfer.RequestDump("thief2vr_hud.bmp");
+        Log("HudDump: HUD image (capture scale %.2f) to thief2vr_hud.bmp", Config().hud_capture_scale);
+    }
     f12_was_down = f12_down;
 
     static bool f7_was_down;
@@ -463,7 +490,8 @@ bool VrOnPresent(IDirect3DDevice9* device)
                                                  {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerQuad quad, menu_quad, dot_quad;
-    const XrCompositionLayerBaseHeader* layers[4];
+    XrCompositionLayerQuad wrist_quads[wrist_hud::kCuts];
+    const XrCompositionLayerBaseHeader* layers[4 + wrist_hud::kCuts];
     bool pointer_used = false;
     uint32_t layer_count = 0;
 
@@ -492,13 +520,23 @@ bool VrOnPresent(IDirect3DDevice9* device)
         }
         if (s.hud_enabled) {
             double t0 = VrNowMs();
-            bool hud_ok = g_hud.Update(device, g_frame.should_render, true, s.hud_capture_scale);
+            bool hud_ok = g_hud.Update(device, g_frame.should_render, true, s.hud_capture_scale, &g_wrist_atlas,
+                                       g_wrist_cuts);
             g_stats.hud += VrNowMs() - t0;
             if (hud_ok) {
                 XrPosef hud_pose{{0, 0, 0, 1}, {0.0f, s.hud_vertical_offset, -s.hud_distance}};
                 g_hud.Fill(quad, Xr().view_space(), hud_pose, s.hud_width);
                 quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+                // The wrists' HUD elements, while looked at.
+                XrPosef head = g_frame.views[0].pose;
+                head.position = {(g_frame.views[0].pose.position.x + g_frame.views[1].pose.position.x) * 0.5f,
+                                 (g_frame.views[0].pose.position.y + g_frame.views[1].pose.position.y) * 0.5f,
+                                 (g_frame.views[0].pose.position.z + g_frame.views[1].pose.position.z) * 0.5f};
+                int wrist_count = wrist_hud::Layers(g_wrist_cuts, g_wrist_atlas.handle(), Xr().local_space(),
+                                                    g_frame.display_time, head, wrist_quads);
+                for (int i = 0; i < wrist_count; ++i)
+                    layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&wrist_quads[i]);
             }
         }
         // The window holds only the HUD (on black): show the right eye there instead.

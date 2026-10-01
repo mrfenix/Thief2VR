@@ -1500,6 +1500,52 @@ static void InstallHudHook()
     Log("Engine: inventory display hook %s", MH_StatusToString(st));
 }
 
+bool EngineHudLayout(int canvas[2], int rect[2][4], int object[2], int hidden[2])
+{
+    if (!g_base)
+        return false;
+    __try {
+        unsigned char* c = *reinterpret_cast<unsigned char**>(g_base + 0x6b8608);  // DAT_00ab8608
+        if (!c)
+            return false;
+        canvas[0] = *reinterpret_cast<short*>(c + 8);
+        canvas[1] = *reinterpret_cast<short*>(c + 10);
+        for (int slot = 0; slot < 2; ++slot) {
+            unsigned char* s = g_base + 0x6adb78 + slot * 0x2c;  // DAT_00aadb78
+            const short* r = reinterpret_cast<const short*>(s + 4);
+            for (int i = 0; i < 4; ++i)
+                rect[slot][i] = r[i];
+            object[slot] = *reinterpret_cast<int*>(s + 0x20);
+            hidden[slot] = *reinterpret_cast<int*>(s + 0x24);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void EngineLogHudLayout()
+{
+    // The inventory display's slots (DAT_00aadb78 + slot * 0x2c): the screen rect
+    // (shorts x0 y0 x1 y1 at +4), the object (+0x20) and the hidden flag (+0x24);
+    // slot 0 the weapon, 1 the item. The canvas size at DAT_00ab8608 + 8 / + 10.
+    if (!g_base)
+        return;
+    __try {
+        unsigned char* canvas = *reinterpret_cast<unsigned char**>(g_base + 0x6b8608);
+        if (canvas)
+            Log("HudDump: canvas %d x %d", *reinterpret_cast<short*>(canvas + 8), *reinterpret_cast<short*>(canvas + 10));
+        for (int slot = 0; slot < 2; ++slot) {
+            unsigned char* s = g_base + 0x6adb78 + slot * 0x2c;
+            const short* r = reinterpret_cast<const short*>(s + 4);
+            Log("HudDump: slot %d rect (%d %d)-(%d %d) object %d hidden %d", slot, r[0], r[1], r[2], r[3],
+                *reinterpret_cast<int*>(s + 0x20), *reinterpret_cast<int*>(s + 0x24));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("HudDump: unreadable");
+    }
+}
+
 int EngineFrobTarget()
 {
     return g_base ? *reinterpret_cast<int*>(g_base + 0x6a1e08) : 0;  // DAT_00aa1e08

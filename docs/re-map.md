@@ -155,6 +155,12 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - **Frob handlers** (`FUN_004540f0` fills `DAT_00aa17cc..e0`): in world, in inventory, inventory → world (`LAB_004522d0`: throw the item, `FUN_00451530`), inventory → inventory, world → world, world → inventory.
 - **Thief2VR:** with hand frob, `FUN_0058fe80` scores against the right hand instead (touching within 1 ft wins, else a 27° cone from the hand), and `FUN_0058fed0` resets that score.
 
+### Inventory display / HUD layout
+- Slots at `DAT_00aadb78 + slot * 0x2c` (slot 0 the weapon, 1 the item): +0 the render resource, +4 the screen rect (shorts x0 y0 x1 y1, canvas pixels), +0x20 the object, +0x24 a hidden flag. Laid out each frame by `FUN_00452f10` (which, while junk is wielded, hides slot 0 and centres slot 1), then drawn by `FUN_00452780` (cdecl(int)), which skips hidden slots. The canvas size is at `DAT_00ab8608` + 8 / + 10.
+- `DAT_00a9fa08` is re-read every frame from the quest variable `HIDE_UI_ELEMENTS` (bits 8 << slot hide slots).
+- At 1600 x 900: weapon slot (0,666)-(240,846), item slot (1360,666)-(1600,846), the health shields in a row along the bottom left below them, the light gem ("vismeter", an overlay model) at the bottom centre.
+- **Thief2VR wrist HUD:** the captured HUD's zones (slots from the engine; health and gem below them) are cut into a wrist atlas and cleared from the HUD in front of the view; each wrist shows its quads while looked at.
+
 ### Throwing
 - `FUN_00451530(launcher, obj, power)`: a creature (body) is laid down with the launcher's flags `0x804`; anything else goes to `FUN_005500e0(launcher, obj, power, 0x802, 0, 0, 0)`. Flag 2 pushes the start out along the facing with a collision check; 0x800 scales by mass. The power is fixed (`0x7b6f0c`), so there's no charge.
 - **Thief2VR:** with nothing highlighted, the grip's "use item" waits for the grip to be let go; the throw then leaves from the hand along the hand's velocity (or pointing, when slow), its power scaled by the hand's speed (`EngineSetThrow`, through the launcher hook).

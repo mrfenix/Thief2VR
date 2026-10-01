@@ -59,6 +59,7 @@
     <ClCompile Include="input\vr_controls.cpp" />
     <ClCompile Include="input\screen_pointer.cpp" />
     <ClCompile Include="ui\vr_menu.cpp" />
+    <ClCompile Include="ui\wrist_hud.cpp" />
     <!-- Dear ImGui (VR settings menu) -->
     <ClCompile Include="..\third_party\imgui\imgui.cpp" />
     <ClCompile Include="..\third_party\imgui\imgui_draw.cpp" />
