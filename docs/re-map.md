@@ -149,6 +149,16 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 - **World bow model:** `bow2.bin`, up along Z (tips at ±1.89 ft), handle near Z = 0 on the −Y side; limbs sweep to +Y.
 - **Thief2VR (hands on):** the bow arm is hidden and `bow2.bin` is drawn in the bow hand with a string and the nocked arrow's model. The launcher is hooked: the player's nocked arrow starts at the drawn arrow's centre, and the camera angles are set to its direction for the call.
 
+### Frob (use / pick up)
+- **Per frame (`FUN_0044e660`):** `FUN_0044fe00` turns the pick candidate `DAT_009a337c` into the highlighted target `DAT_00aa1e08` (filtered by look speed, `head_focus_speed_tol`, and distance `DAT_00892b74`; notifies through `FUN_00589c40`), then `FUN_0058fed0` resets the pick (candidate 0, best score `DAT_009a3384`, ray from the camera `DAT_00aa141c`).
+- **While objects are drawn:** `FUN_00463ae0` offers each one passing the frob filter `FUN_0058a320` to `FUN_0058fe80` (object in EAX, moved to ESI), which scores its on-screen box against the screen centre (`FUN_0058fc40`), drops excluded ones (`FUN_004509b0`, object in ESI) and keeps the best (returns `DAT_009a337c`).
+- **Frob handlers** (`FUN_004540f0` fills `DAT_00aa17cc..e0`): in world, in inventory, inventory → world (`LAB_004522d0`: throw the item, `FUN_00451530`), inventory → inventory, world → world, world → inventory.
+- **Thief2VR:** with hand frob, `FUN_0058fe80` scores against the right hand instead (touching within 1 ft wins, else a 27° cone from the hand), and `FUN_0058fed0` resets that score.
+
+### Throwing
+- `FUN_00451530(launcher, obj, power)`: a creature (body) is laid down with the launcher's flags `0x804`; anything else goes to `FUN_005500e0(launcher, obj, power, 0x802, 0, 0, 0)`. Flag 2 pushes the start out along the facing with a collision check; 0x800 scales by mass. The power is fixed (`0x7b6f0c`), so there's no charge.
+- **Thief2VR:** with nothing highlighted, the grip's "use item" waits for the grip to be let go; the throw then leaves from the hand along the hand's velocity (or pointing, when slow), its power scaled by the hand's speed (`EngineSetThrow`, through the launcher hook).
+
 ### Sound listener
 - **3D provider:** `DAT_0086f81c` (set in `FUN_00571620` from the config key `snd3d`): `a3d` → 2 (DirectSound3D), `openal` → 4 (OpenAL). Without the key it's the game's own software mixing: 3D sound is panned by NewDark and no listener / 3D source methods are called, so Thief2VR can't move the ears. The installer sets `snd3d openal` (or `a3d` without OpenAL32.dll). The audio options menu (`FUN_0045c960`) shows "OpenAL" / "DirectSound3D" from it.
 - With DirectSound3D, Thief2VR hooks DirectSound's own IDirectSound3DListener (SetPosition, SetOrientation, SetAllParameters) and IDirectSound3DBuffer (SetPosition, SetAllParameters; head-relative buffers) methods, found through a throwaway DirectSound object.

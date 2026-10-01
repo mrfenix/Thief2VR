@@ -1126,6 +1126,17 @@ static void InstallListenerHooks()
 
 void EngineSetListenerPose(const float pos[3], const float front[3], const float top[3])
 {
+    static bool logged;
+    if (!logged && g_base) {
+        // The 3D sound provider (DAT_0086f81c, from the config key snd3d).
+        logged = true;
+        int provider = *reinterpret_cast<int*>(g_base + 0x46f81c);
+        if (provider == 4 || provider == 2)
+            Log("Sound: 3D through %s", provider == 4 ? "OpenAL" : "DirectSound3D");
+        else
+            Log("Sound: WARNING: the game mixes 3D sound itself (provider %d), so sounds turn with the aiming "
+                "hand; set \"snd3d openal\" (or \"snd3d a3d\") in cam_ext.cfg", provider);
+    }
     for (int i = 0; i < 3; ++i) {
         g_head_pos[i] = pos[i];
         g_head_front[i] = front[i];
@@ -1223,18 +1234,22 @@ static LaunchFn g_launch_tramp;
 static bool g_bow_shot_valid;
 static float g_bow_shot_offset[3], g_bow_shot_dir[3];
 
-static int __cdecl LaunchDetour(int launcher, int projectile, float power, unsigned flags, float* velocity, int arg6,
-                                float* start)
-{
-    int* cam = *g_engine.current_camera;
-    int player = *reinterpret_cast<int*>(g_base + 0x6a1418);  // DAT_00aa1418
-    if (!g_bow_shot_valid || start || !cam || cam[0] != 0 || launcher != player || projectile <= 0 ||
-        projectile != EngineNockedArrow() || EngineLimbMode() != 1)
-        return g_launch_tramp(launcher, projectile, power, flags, velocity, arg6, start);
+// The player's throws (frob "inventory -> world", FUN_00451530: flags 0x802, a
+// fixed power) go through the launcher too, from the camera along its facing.
+// With VR throwing they leave from the hand instead, along the swing, harder
+// the faster it is (EngineSetThrow, set as the grip is let go).
+static bool g_throw_valid;
+static ULONGLONG g_throw_until;
+static float g_throw_offset[3], g_throw_dir[3], g_throw_power = 1.0f;
 
-    // Within arm's reach of the camera, like the game's own spot.
+// Launches from the camera + offset (clamped to arm's reach) along dir: the
+// start point is passed, and the camera's angles (the launcher's facing) are
+// set to dir for the call.
+static int LaunchAlong(int* cam, const float offset[3], const float dir[3], int launcher, int projectile, float power,
+                       unsigned flags, float* velocity, int arg6)
+{
     const float* c = reinterpret_cast<const float*>(cam + 2);
-    float o[3] = {g_bow_shot_offset[0], g_bow_shot_offset[1], g_bow_shot_offset[2]};
+    float o[3] = {offset[0], offset[1], offset[2]};
     float reach = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
     const float kMaxReach = 2.5f;
     if (reach > kMaxReach)
@@ -1243,10 +1258,9 @@ static int __cdecl LaunchDetour(int launcher, int projectile, float power, unsig
     float from[3] = {c[0] + o[0], c[1] + o[1], c[2] + o[2]};
 
     // Facing: forward = RotZ(heading) * RotY(pitch) * x = (cos p cos h, cos p sin h, -sin p).
-    const float* d = g_bow_shot_dir;
     const float to16 = 65536.0f / (2.0f * 3.14159265f);
-    float heading = std::atan2(d[1], d[0]);
-    float pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, -d[2])));
+    float heading = std::atan2(dir[1], dir[0]);
+    float pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, -dir[2])));
     uint16_t* angles = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(cam) + 0x14);
     uint16_t saved[3] = {angles[0], angles[1], angles[2]};
     angles[0] = 0;
@@ -1256,9 +1270,239 @@ static int __cdecl LaunchDetour(int launcher, int projectile, float power, unsig
     angles[0] = saved[0];
     angles[1] = saved[1];
     angles[2] = saved[2];
-    Log("Bow: shot from %.2f ft of the camera, direction (%.2f %.2f %.2f), power %.2f", reach > kMaxReach ? kMaxReach : reach,
-        d[0], d[1], d[2], power);
     return result;
+}
+
+static int __cdecl LaunchDetour(int launcher, int projectile, float power, unsigned flags, float* velocity, int arg6,
+                                float* start)
+{
+    int* cam = *g_engine.current_camera;
+    int player = *reinterpret_cast<int*>(g_base + 0x6a1418);  // DAT_00aa1418
+    if (start || !cam || cam[0] != 0 || launcher != player || projectile <= 0)
+        return g_launch_tramp(launcher, projectile, power, flags, velocity, arg6, start);
+    if (g_bow_shot_valid && projectile == EngineNockedArrow() && EngineLimbMode() == 1)
+        return LaunchAlong(cam, g_bow_shot_offset, g_bow_shot_dir, launcher, projectile, power, flags, velocity, arg6);
+    if (g_throw_valid && GetTickCount64() <= g_throw_until && (flags & 0x800) && !(flags & 4)) {
+        g_throw_valid = false;
+        return LaunchAlong(cam, g_throw_offset, g_throw_dir, launcher, projectile, power * g_throw_power, flags,
+                           velocity, arg6);
+    }
+    return g_launch_tramp(launcher, projectile, power, flags, velocity, arg6, start);
+}
+
+void EngineSetThrow(const float offset[3], const float dir[3], float power_scale)
+{
+    for (int i = 0; i < 3; ++i) {
+        g_throw_offset[i] = offset[i];
+        g_throw_dir[i] = dir[i];
+    }
+    g_throw_power = power_scale;
+    g_throw_valid = g_launch_tramp != nullptr;
+    g_throw_until = GetTickCount64() + 300;
+}
+
+// --- Physical frob ---
+// The frob target comes from a pick each frame: FUN_0058fed0 resets it (DAT_009a337c
+// = 0, best score DAT_009a3384), then while objects are drawn FUN_00463ae0 offers
+// each frobbable one to FUN_0058fe80 (object in EAX), which scores it by its
+// on-screen box against the screen centre (in VR: where the eyes look) and keeps
+// the best; FUN_0044fe00 makes that the highlighted target (DAT_00aa1e08). With
+// hand frob, objects are scored against the hand instead: one it touches wins,
+// else the one it points at (a cone from the hand).
+static bool g_hand_ray_valid;
+static ULONGLONG g_hand_ray_until;
+static float g_hand_origin[3], g_hand_dir[3];
+static float g_hand_pick_best = 1e30f;
+static void* g_pick_candidate_tramp;   // FUN_0058fe80
+static void* g_pick_reset_tramp;       // FUN_0058fed0
+static void* g_pick_exclude_fn;        // FUN_004509b0: nonzero = not pickable (object in ESI)
+static int* g_pick_candidate;          // DAT_009a337c
+
+// Calls FUN_004509b0 with the object in ESI, keeping the callee-saved registers.
+__declspec(naked) static int __cdecl PickExcluded(int /*obj*/)
+{
+    __asm {
+        push ebx
+        push esi
+        push edi
+        push ebp
+        mov esi, [esp + 20]
+        call dword ptr [g_pick_exclude_fn]
+        pop ebp
+        pop edi
+        pop esi
+        pop ebx
+        ret
+    }
+}
+
+// The hand's score for an object (lower is better), or -1 if it doesn't qualify.
+static float HandPickScore(int obj)
+{
+    const float* p = reinterpret_cast<const float*>(EngineObjectPosition(obj));
+    if (!p)
+        return -1;
+    float v[3] = {p[0] - g_hand_origin[0], p[1] - g_hand_origin[1], p[2] - g_hand_origin[2]};
+    float dist = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const float kTouch = 1.0f;  // ft: the hand is on it
+    if (dist < kTouch)
+        return dist * 0.1f;
+    float along = v[0] * g_hand_dir[0] + v[1] * g_hand_dir[1] + v[2] * g_hand_dir[2];
+    if (along < 0.1f)
+        return -1;
+    float perp = std::sqrt(std::fmax(0.0f, dist * dist - along * along));
+    float slope = perp / along;  // tan of the angle off the hand's pointing
+    if (slope > 0.5f)
+        return -1;
+    return 0.1f + slope + 0.02f * along;
+}
+
+// Within the game's frob reach of the player: its pick allows objects whose
+// distance from the camera, less their size, is within DAT_009a3388 (squared).
+static bool InFrobReach(int obj)
+{
+    int* cam = *g_engine.current_camera;
+    const float* p = reinterpret_cast<const float*>(EngineObjectPosition(obj));
+    float reach2 = *reinterpret_cast<float*>(g_base + 0x5a3388);  // DAT_009a3388
+    if (!cam || !p || !(reach2 > 0))
+        return true;
+    const float* c = reinterpret_cast<const float*>(cam + 2);
+    float dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2];
+    float d = std::sqrt(dx * dx + dy * dy + dz * dz) - 1.0f;  // ~1 ft for the object's size
+    return d <= 0 || d * d <= reach2;
+}
+
+// Returns 1 if the hand decided (the candidate is DAT_009a337c), 0 to let the game score it.
+static int __cdecl HandPickCandidate(int obj)
+{
+    if (!g_hand_ray_valid || GetTickCount64() > g_hand_ray_until)
+        return 0;
+    __try {
+        float score = HandPickScore(obj);
+        if (score >= 0 && score < g_hand_pick_best && InFrobReach(obj) && !PickExcluded(obj)) {
+            g_hand_pick_best = score;
+            *g_pick_candidate = obj;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return 1;
+}
+
+__declspec(naked) static void PickCandidateDetour()
+{
+    __asm {
+        pushad
+        push eax
+        call HandPickCandidate
+        add esp, 4
+        test eax, eax
+        popad
+        jz original
+        mov eax, dword ptr [g_pick_candidate]
+        mov eax, [eax]
+        ret
+    original:
+        jmp dword ptr [g_pick_candidate_tramp]
+    }
+}
+
+static void __cdecl PickResetDetour()
+{
+    reinterpret_cast<void(__cdecl*)()>(g_pick_reset_tramp)();
+    g_hand_pick_best = 1e30f;
+}
+
+void EngineSetHandRay(bool valid, const float origin[3], const float dir[3])
+{
+    g_hand_ray_valid = valid && g_pick_candidate_tramp;
+    if (!g_hand_ray_valid)
+        return;
+    for (int i = 0; i < 3; ++i) {
+        g_hand_origin[i] = origin[i];
+        g_hand_dir[i] = dir[i];
+    }
+    g_hand_ray_until = GetTickCount64() + 250;
+}
+
+static void InstallPickHooks()
+{
+    unsigned char* candidate = g_base + 0x18fe80;  // FUN_0058fe80
+    unsigned char* reset = g_base + 0x18fed0;      // FUN_0058fed0
+    unsigned char* exclude = g_base + 0x509b0;     // FUN_004509b0
+    if (!Matches(candidate, "51 56 8b f0 e8 ?? ?? ?? ?? d9 5c 24 04 d9 44 24 04 d9 05 ?? ?? ?? ??") ||
+        !Matches(reset, "a1 ?? ?? ?? ?? d9 05 ?? ?? ?? ?? 83 ec 34 d9 1d ?? ?? ?? ?? 56 57 c7 05") ||
+        !Matches(exclude, "51 85 f6 74 39 a1 ?? ?? ?? ?? 8b 08 8d 14 24 52 56 50")) {
+        Log("Engine: frob pick signatures mismatch; frob follows the view");
+        return;
+    }
+    g_pick_exclude_fn = exclude;
+    g_pick_candidate = reinterpret_cast<int*>(g_base + 0x5a337c);  // DAT_009a337c
+    MH_STATUS st = MH_CreateHook(candidate, reinterpret_cast<void*>(&PickCandidateDetour), &g_pick_candidate_tramp);
+    if (st == MH_OK)
+        st = MH_CreateHook(reset, reinterpret_cast<void*>(&PickResetDetour), &g_pick_reset_tramp);
+    if (st == MH_OK)
+        st = MH_EnableHook(candidate);
+    if (st == MH_OK)
+        st = MH_EnableHook(reset);
+    if (st != MH_OK)
+        g_pick_candidate_tramp = nullptr;
+    Log("Engine: frob pick hooks %s", MH_StatusToString(st));
+}
+
+int EngineHeldJunk()
+{
+    // The inventory (IInventory, DAT_00a9f9fc; __stdcall, this first): vtbl 0x30
+    // WieldingJunk(), vtbl 0x2c the wielded object.
+    void** inv = g_base ? *reinterpret_cast<void***>(g_base + 0x69f9fc) : nullptr;
+    if (!inv)
+        return 0;
+    __try {
+        void** vt = *reinterpret_cast<void***>(inv);
+        if (!reinterpret_cast<int(__stdcall*)(void*)>(vt[0x30 / 4])(inv))
+            return 0;
+        return reinterpret_cast<int(__stdcall*)(void*)>(vt[0x2c / 4])(inv);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// The inventory display (FUN_00452780, cdecl(int), drawn after its layout
+// FUN_00452f10) skips a slot whose "hidden" flag is set: slot 1 (the item, or the
+// wielded junk shown centred) at DAT_00aadbc8. The layout clears it every frame,
+// so it's set just before the draw while the held object shows in the hand.
+static void* g_hud_draw_tramp;
+static bool g_hide_item_slot;
+
+static void __cdecl HudDrawDetour(int arg)
+{
+    if (g_hide_item_slot)
+        *reinterpret_cast<int*>(g_base + 0x6adbc8) = 1;  // DAT_00aadbc8
+    reinterpret_cast<void(__cdecl*)(int)>(g_hud_draw_tramp)(arg);
+}
+
+void EngineHideItemSlot(bool hide)
+{
+    g_hide_item_slot = hide && g_hud_draw_tramp;
+}
+
+static void InstallHudHook()
+{
+    unsigned char* draw = g_base + 0x52780;  // FUN_00452780
+    if (!Matches(draw, "6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec c8 00 00 00 53 55 56 57")) {
+        Log("Engine: inventory display signature mismatch; a held object also shows on screen");
+        return;
+    }
+    MH_STATUS st = MH_CreateHook(draw, reinterpret_cast<void*>(&HudDrawDetour), &g_hud_draw_tramp);
+    if (st == MH_OK)
+        st = MH_EnableHook(draw);
+    if (st != MH_OK)
+        g_hud_draw_tramp = nullptr;
+    Log("Engine: inventory display hook %s", MH_StatusToString(st));
+}
+
+int EngineFrobTarget()
+{
+    return g_base ? *reinterpret_cast<int*>(g_base + 0x6a1e08) : 0;  // DAT_00aa1e08
 }
 
 int EngineNockedArrow()
@@ -1398,6 +1642,8 @@ static void InstallWeaponHooks()
     } else {
         Log("Engine: launch signature mismatch; arrows leave from the game's own spot");
     }
+    InstallPickHooks();
+    InstallHudHook();
 }
 
 void EngineSetWeaponPointTransform(WeaponPointTransform transform)

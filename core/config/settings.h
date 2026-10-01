@@ -29,6 +29,8 @@
     X(bool, aim_with_hand, true, 0, 1, "Hands", "Aim, frob and weapons follow the right hand")                  \
     X(bool, weapon_in_hand, true, 0, 1, "Hands", "Hold the weapon in your hand (off = in front of the view)")   \
     X(bool, show_hands, true, 0, 1, "Hands", "Show both hands (the weapon in the right hand, no arm)")               \
+    X(bool, hand_frob, true, 0, 1, "Hands", "Frob what your hand touches or points at (off = where you look)")       \
+    X(bool, swing_to_throw, true, 0, 1, "Hands", "Throw by swinging (hold the grip, swing, let go)")                 \
     X(float, hand_brightness, 1.0f, 0.2f, 2.0f, "Hands", "Hand brightness")                                          \
     X(float, hand_forward_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: forward (cm)")                           \
     X(float, hand_up_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: up (cm)")                                     \

@@ -89,8 +89,18 @@ bool MakeBow(const BowInput& in, BowPose& out, Vec3& shot_centre, Vec3& shot_dir
 // bow out of the index-finger end), the arrow towards the fingers.
 Mat3 BowFrameInHand(const Hand& hand, float world_scale);
 
+// A picked-up object held in the right hand: its model file and the hand's frame
+// (see WeaponFrame); the model is centred in the fist.
+struct HeldPose {
+    bool visible = false;
+    const char* model = nullptr;
+    Mat3 r;
+    Vec3 p;
+};
+
 void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* depth, const Eye& eye,
-          const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, float brightness);
+          const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, const HeldPose& held,
+          float brightness);
 
 // True once the game's weapon models were loaded (on the first Draw).
 bool WeaponModelsLoaded();

@@ -610,6 +610,11 @@ void FillHand(int side, const XrPosef& grip_raw, const XrPosef& aim_raw, const X
         h.index = h.middle = h.ring = h.pinky = h.thumb = 1.0f;
 }
 
+// The right hand (world) for physical frob and throwing, from the last frame.
+bool g_right_hand_valid;
+Vec3 g_right_hand_offset, g_right_hand_aim;  // grip point relative to the game camera; pointing
+Mat3 g_tracked_to_world;                     // tracking -> world rotation
+
 // --- The bow ---
 // Where the bow is (in the bow hand, or the game's bow pinned there), how far
 // it's drawn, the nocked arrow, and where that arrow would leave from; handed
@@ -655,7 +660,6 @@ bool UpdateBow(int bow_hand, bool two_handed, const Mat3& tw_a, Vec3 tw_b, const
         named = arrow;
         file[0] = 0;
         char name[32];
-        const char* what = nocked ? "nocked" : "selected";
         auto is_arrow = [](const char* n) {  // arrow model names all contain "arr"
             for (; n[0] && n[1] && n[2]; ++n)
                 if (_strnicmp(n, "arr", 3) == 0)
@@ -664,10 +668,8 @@ bool UpdateBow(int bow_hand, bool two_handed, const Mat3& tw_a, Vec3 tw_b, const
         };
         if (arrow && EngineObjectModelName(arrow, name, sizeof(name)) && is_arrow(name)) {
             snprintf(file, sizeof(file), "%s.bin", name);
-            Log("Bow: %s arrow %d, model %s", what, arrow, name);
-        } else if (arrow) {
-            snprintf(file, sizeof(file), "arrow.bin");  // the broadhead
-            Log("Bow: %s arrow %d, no arrow model (showing a broadhead)", what, arrow);
+        } else if (nocked) {
+            snprintf(file, sizeof(file), "arrow.bin");  // a nocked arrow without a model name: a broadhead
         }
     }
     in.arrow = file[0] ? file : nullptr;
@@ -907,6 +909,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             SmoothHand(h, frame->display_time, sm_grip[h], sm_aim[h]);
     }
     hands::BowPose bow_pose;
+    hands::HeldPose held_pose;
     bool bow_shot = false;
     if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam && located[main_hand]) {
         grip_pose = sm_grip[main_hand];
@@ -965,11 +968,45 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         }
         if (bow)
             bow_shot = UpdateBow(main_hand, bow_left, tw_a, tw_b, sm_grip, located, grip_pose, bow_pose);
+        // A picked-up object (junk) shows in the right hand, not in the inventory display.
+        static int named_junk;
+        static char junk_file[48];
+        int junk = Config().show_hands && g_hand[1].visible ? EngineHeldJunk() : 0;
+        if (junk != named_junk) {
+            named_junk = junk;
+            junk_file[0] = 0;
+            char name[32];
+            if (junk && EngineObjectModelName(junk, name, sizeof(name)))
+                snprintf(junk_file, sizeof(junk_file), "%s.bin", name);
+        }
+        if (junk && junk_file[0]) {
+            held_pose.visible = true;
+            held_pose.model = junk_file;
+            hands::WeaponFrame(g_hand[1], Config().world_scale, held_pose.r, held_pose.p);
+            hands::Hand& h = g_hand[1];
+            h.index = h.middle = h.ring = h.pinky = std::fmax(h.middle, 0.7f);
+            h.thumb = std::fmax(h.thumb, 0.6f);
+        }
+        EngineHideItemSlot(held_pose.visible);
+        // Physical frob and throwing: the right hand's grip point and pointing (world).
+        g_tracked_to_world = world_yaw * unyaw * XrToEngineBasis();
+        g_right_hand_valid = located[1];
+        if (located[1]) {
+            Vec3 grip_w = tw_b + tw_a * ToVec(sm_grip[1].position);
+            g_right_hand_offset = grip_w - g_arm_pg;
+            g_right_hand_aim = world_yaw * unyaw * EngineOrientation(sm_aim[1].orientation) * Vec3{1, 0, 0};
+            const float o[3] = {grip_w.x, grip_w.y, grip_w.z};
+            const float d[3] = {g_right_hand_aim.x, g_right_hand_aim.y, g_right_hand_aim.z};
+            EngineSetHandRay(Config().hand_frob, o, d);
+        } else {
+            EngineSetHandRay(false, nullptr, nullptr);
+        }
         g_weapon_d = g_arm_rh * Transpose(g_arm_rg);
         g_weapon_offset = g_arm_ph - g_arm_pg;
         g_weapon_valid_until = GetTickCount64() + 250;
     } else {
         g_weapon_valid_until = 0;
+        EngineHideItemSlot(false);
     }
 
     g_arm_dump_active = g_arm_dump_requested;
@@ -1060,7 +1097,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         }
         if (hands_on) {
             hands::Eye he{engine_eye_rot, {p.x, p.y, p.z}, (eye_h * 0.5f) / tan_v, eye_w * 0.5f, eye_h * 0.5f};
-            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, bow_pose,
+            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, bow_pose, held_pose,
                         Config().hand_brightness);
         }
         if (g_eye_msaa)
@@ -1165,6 +1202,24 @@ bool TrackedDirectionAngles(const XrVector3f& direction, float& heading, float& 
         return false;
     heading = std::atan2(v.y, v.x);
     pitch = std::asin(-v.z / len);  // positive = down
+    return true;
+}
+
+bool StereoRightHand(float offset[3], float aim[3])
+{
+    if (!g_right_hand_valid)
+        return false;
+    offset[0] = g_right_hand_offset.x, offset[1] = g_right_hand_offset.y, offset[2] = g_right_hand_offset.z;
+    aim[0] = g_right_hand_aim.x, aim[1] = g_right_hand_aim.y, aim[2] = g_right_hand_aim.z;
+    return true;
+}
+
+bool StereoTrackedDirToWorld(const XrVector3f& v, float out[3])
+{
+    if (!g_right_hand_valid)
+        return false;
+    Vec3 w = g_tracked_to_world * ToVec(v);
+    out[0] = w.x, out[1] = w.y, out[2] = w.z;
     return true;
 }
 

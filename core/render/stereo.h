@@ -55,6 +55,13 @@ bool TrackedDirectionAngles(const XrVector3f& direction, float& heading, float& 
 // held one-handed. False otherwise.
 bool StereoBowAim(float& heading, float& pitch);
 
+// The right hand from the last rendered frame: its grip point relative to the
+// game camera (feet, world axes) and its pointing (unit, world). False if not
+// tracked.
+bool StereoRightHand(float offset[3], float aim[3]);
+// A tracked direction / velocity (LOCAL space) in world axes (rotation only).
+bool StereoTrackedDirToWorld(const XrVector3f& v, float out[3]);
+
 // Converts a tracked point (LOCAL space, metres) into an offset from the game
 // camera in engine world axes (feet), using the same mapping as the rendered
 // eyes. world_yaw is the view's world yaw (EngineWorldYaw).

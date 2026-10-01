@@ -294,7 +294,44 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         if (EngineMeleeStrike(true))
             g_strike_time = 0;
     }
-    g_use_item.Set(grip && !grip_draws);
+    // --- Right grip: frob / use item. With nothing highlighted, the use waits
+    //     for the grip to be let go: hold, swing and let go to throw (the item
+    //     leaves the hand along the swing, harder the faster it is; a gentle
+    //     release drops it). Potions and the like are used on the release.
+    //     Without "Throw by swinging" the use is at once, and a throw leaves
+    //     the hand where it points.
+    const bool grip_use = grip && !grip_draws;
+    static bool grip_use_was, throw_hold;
+    static int use_tap;  // a tap of "use item": 2 = press this frame, 1 = release
+    bool want_use = grip_use;
+    if (grip_use && !grip_use_was) {
+        bool nothing_highlighted = EngineFrobTarget() == 0;
+        throw_hold = s.swing_to_throw && nothing_highlighted;
+        float offset[3], aim[3];
+        if (!s.swing_to_throw && nothing_highlighted && StereoRightHand(offset, aim))
+            EngineSetThrow(offset, aim, 1.0f);
+    }
+    if (throw_hold) {
+        want_use = false;
+        if (!grip_use) {
+            throw_hold = false;
+            float offset[3], aim[3], v[3];
+            if (StereoRightHand(offset, aim)) {
+                Vec3 velocity{};
+                if (c.velocity_valid[1] && StereoTrackedDirToWorld(c.linear_velocity[1], v))
+                    velocity = {v[0], v[1], v[2]};
+                float speed = Length(velocity);  // m/s
+                Vec3 dir = speed > 1.0f ? velocity * (1.0f / speed) : Vec3{aim[0], aim[1], aim[2]};
+                const float d[3] = {dir.x, dir.y, dir.z};
+                EngineSetThrow(offset, d, std::fmin(1.6f, std::fmax(0.35f, speed / 3.5f)));
+            }
+            use_tap = 2;
+        }
+    }
+    if (use_tap > 0)
+        want_use = use_tap-- == 2;
+    grip_use_was = grip_use;
+    g_use_item.Set(want_use);
     g_block.Set(Analog(lt, c.trigger[0]));
 
     // --- Crouch: left grip, or physically crouching ---

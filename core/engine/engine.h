@@ -139,3 +139,19 @@ bool EngineObjectModelName(int obj, char* out, int size);
 // every frame while the bow is out; the player's bow shot uses it instead of
 // the game's own spot and the camera's facing (valid = false: the game's).
 void EngineSetBowShot(bool valid, const float offset[3], const float dir[3]);
+
+// The highlighted frob target (DAT_00aa1e08), or 0.
+int EngineFrobTarget();
+// The non-loot object the player is holding (picked up "junk": a bottle, a
+// crate...), or 0.
+int EngineHeldJunk();
+// Hides the inventory display's item slot (e.g. while the held object shows in
+// the hand); false shows it again.
+void EngineHideItemSlot(bool hide);
+// Physical frob: the hand's position and pointing (world). Each frame while
+// valid, the frob target is what the hand touches or points at instead of what
+// the view centres on (valid = false: the game's own pick).
+void EngineSetHandRay(bool valid, const float origin[3], const float dir[3]);
+// Physical throwing: the next thrown item (within 300 ms) leaves from the
+// camera + offset (feet, world) along dir, its power scaled by power_scale.
+void EngineSetThrow(const float offset[3], const float dir[3], float power_scale);
