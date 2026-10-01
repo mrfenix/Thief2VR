@@ -913,11 +913,12 @@ bool WeaponModelsLoaded()
 
 void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* depth, const Eye& eye,
           const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, const HeldPose& held,
-          float brightness)
+          const HeldPose& pouch, float brightness)
 {
     if (!g_models_tried)
         LoadWeaponModels();
-    if (!Ready() || (!left.visible && !right.visible && weapon.kind == Weapon::None && !bow.visible && !held.visible))
+    if (!Ready() || (!left.visible && !right.visible && weapon.kind == Weapon::None && !bow.visible && !held.visible &&
+                     !pouch.visible))
         return;
     if (!g_state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_state)))
         return;
@@ -965,14 +966,23 @@ void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* de
         DrawWeapon(dev, g_blackjack, weapon, eye, light);
     if (bow.visible)
         DrawBow(dev, bow, eye, light);
-    if (held.visible && held.model) {
+    for (const HeldPose* object : {&held, &pouch}) {
+        if (object->visible && object->model && !object->in_hand) {
+            if (WeaponModel* m = Held(object->model)) {
+                Vec3 centre = (m->model.bbox_min + m->model.bbox_max) * 0.5f;
+                DrawModel(dev, *m, eye, light, [&](Vec3 q) { return object->p + object->r * (q - centre); });
+            }
+        }
+    }
+    if (held.visible && held.model && held.in_hand) {
         if (WeaponModel* m = Held(held.model)) {
             // Centred a little towards the fingers (frame -y), so the fist closes on it;
             // large objects scaled down to fit the hand (largest side kMaxHeld).
             const float kMaxHeld = 1.2f;
             Vec3 size = m->model.bbox_max - m->model.bbox_min;
             float largest = std::max(size.x, std::max(size.y, size.z));
-            float scale = largest > kMaxHeld ? kMaxHeld / largest : 1.0f;
+            const float kHeldScale = 1.15f;  // a little larger than life in the hand
+            float scale = (largest > kMaxHeld ? kMaxHeld / largest : 1.0f) * kHeldScale * held.scale;
             Vec3 centre = (m->model.bbox_min + m->model.bbox_max) * 0.5f;
             Vec3 at = held.p + held.r * Vec3{0, -0.1f, 0};
             DrawModel(dev, *m, eye, light, [&](Vec3 q) { return at + held.r * ((q - centre) * scale); });

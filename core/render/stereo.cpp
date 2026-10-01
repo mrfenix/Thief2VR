@@ -7,6 +7,7 @@
 #include "../vr.h"
 #include "../vrmath.h"
 #include "../ui/vr_menu.h"
+#include "../ui/wrist_hud.h"
 #include "../xr/xr_input.h"
 #include "d3d9_hooks.h"
 #include "device_hooks.h"
@@ -626,7 +627,7 @@ ULONGLONG g_bow_drawn_until; // the last drawn shot is kept until then
 Vec3 g_bow_shot_offset, g_bow_shot_dir;
 
 bool UpdateBow(int bow_hand, bool two_handed, const Mat3& tw_a, Vec3 tw_b, const XrPosef sm_grip[2],
-               const bool located[2], const XrPosef& bow_grip, hands::BowPose& pose)
+               const XrPosef sm_aim[2], const bool located[2], const XrPosef& bow_grip, hands::BowPose& pose)
 {
     const Settings& cfg = Config();
     const bool drawn_hands = cfg.show_hands && two_handed;
@@ -686,16 +687,31 @@ bool UpdateBow(int bow_hand, bool two_handed, const Mat3& tw_a, Vec3 tw_b, const
         s.pinky = 0.8f;
     } else if (cfg.show_hands && two_handed && in.arrow && g_hand[1].visible) {
         // Not on the string yet: the arrow is in the drawing hand, as if just
-        // taken from the quiver - through the fist, out of the thumb end, the
-        // nock just behind the hand.
+        // taken from the quiver - pinched near its nock between the thumb and
+        // index finger (at the controller's pointing point), the shaft along
+        // where the hand points.
         hands::Hand& s = g_hand[1];
-        Vec3 fist;
-        hands::WeaponFrame(s, cfg.world_scale, pose.hand_r, fist);
-        pose.hand_nock = fist - pose.hand_r * Vec3{0.3f, 0, 0};
+        Mat3 rot = tw_a;
+        const float inv = cfg.world_scale > 0 ? 1.0f / cfg.world_scale : 1.0f;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                rot.m[i][j] *= inv;  // tracking -> world, without the scale
+        Mat3 aim = rot * QuatMatrix(sm_aim[1].orientation);
+        Vec3 dir = Normalize(aim * Vec3{0, 0, -1});
+        Vec3 up = aim * Vec3{0, 1, 0};
+        up = Normalize(up - dir * Dot(up, dir));
+        Vec3 side = Cross(up, dir);
+        for (int i = 0; i < 3; ++i) {
+            pose.hand_r.m[i][0] = (&dir.x)[i];
+            pose.hand_r.m[i][1] = (&side.x)[i];
+            pose.hand_r.m[i][2] = (&up.x)[i];
+        }
+        Vec3 pinch = tw_b + tw_a * ToVec(sm_aim[1].position);
+        pose.hand_nock = pinch - dir * 0.15f;
         pose.arrow_in_hand = true;
-        s.index = s.middle = 0.8f;
-        s.ring = s.pinky = 0.9f;
-        s.thumb = 0.8f;
+        s.thumb = s.index = 0.55f;
+        s.middle = 0.7f;
+        s.ring = s.pinky = 0.85f;
     }
 
     ULONGLONG now = GetTickCount64();
@@ -823,11 +839,15 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     Vec3 head_offset;  // feet, engine axes, relative to body facing
     if (Config().positional_tracking) {
         head_offset = raw_offset;
-        float horiz = std::sqrt(head_offset.x * head_offset.x + head_offset.y * head_offset.y);
+        // Within reach of the body: the head offset limit - or, with the lean's
+        // camera shift off (leaning is the real head only), the lean reach, in
+        // any direction.
         float limit = Config().position_clamp_ft;
-        if (horiz > limit && horiz > 0) {
-            head_offset.x *= limit / horiz;
-            head_offset.y *= limit / horiz;
+        float reach = Config().lean_camera_shift ? limit : max(limit, Config().lean_reach_ft);
+        float horiz = std::sqrt(head_offset.x * head_offset.x + head_offset.y * head_offset.y);
+        if (horiz > reach && horiz > 0) {
+            head_offset.x *= reach / horiz;
+            head_offset.y *= reach / horiz;
         }
         head_offset.z = Config().vertical_head_tracking ? max(-limit, min(limit, head_offset.z)) : 0.0f;
     }
@@ -909,7 +929,8 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             SmoothHand(h, frame->display_time, sm_grip[h], sm_aim[h]);
     }
     hands::BowPose bow_pose;
-    hands::HeldPose held_pose;
+    hands::HeldPose held_pose, pouch_pose;
+    bool item_in_hand = false;  // the selected inventory item shows in the right hand (the weapon hidden)
     bool bow_shot = false;
     if (g_arm_trampoline && Config().weapon_in_hand && g_head.camera_mode == 0 && cam && located[main_hand]) {
         grip_pose = sm_grip[main_hand];
@@ -967,7 +988,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
                 FillHand(other, raw_grip[other], raw_aim[other], sm_grip[other], sm_aim[other], tw_a, tw_b, false);
         }
         if (bow)
-            bow_shot = UpdateBow(main_hand, bow_left, tw_a, tw_b, sm_grip, located, grip_pose, bow_pose);
+            bow_shot = UpdateBow(main_hand, bow_left, tw_a, tw_b, sm_grip, sm_aim, located, grip_pose, bow_pose);
         // A picked-up object (junk) shows in the right hand, not in the inventory display.
         static int named_junk;
         static char junk_file[48];
@@ -988,6 +1009,70 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             h.thumb = std::fmax(h.thumb, 0.6f);
         }
         EngineHideItemSlot(held_pose.visible);
+        // Cycling the inventory: the newly selected item shows in the right hand
+        // (instead of the weapon) for as long as the game's inventory display shows
+        // it, so you can see what you picked. Without the wrist HUD (nothing to tell
+        // that by) for 2.5 s.
+        {
+            static int last_selected = -1, last_weapon, named_item;
+            static bool item_active;
+            static ULONGLONG item_since;
+            static char item_file[48];
+            int selected = EngineSelectedItem(), weapon = EngineCurrentWeapon();
+            ULONGLONG now = GetTickCount64();
+            if (last_selected != -1 && selected != last_selected && selected != 0 && !junk)
+                item_active = true, item_since = now;
+            if (weapon != last_weapon)
+                item_active = false;  // a weapon chosen: back to it
+            last_selected = selected, last_weapon = weapon;
+            if (item_active && now - item_since > 400) {  // the capture lags the selection a little
+                bool known;
+                bool shown = wrist_hud::ItemShown(known);
+                if (known ? !shown : now - item_since > 2500)
+                    item_active = false;
+            }
+            if (Config().show_hands && g_hand[1].visible && !held_pose.visible && selected && item_active) {
+                if (selected != named_item) {
+                    named_item = selected;
+                    item_file[0] = 0;
+                    char name[32];
+                    if (EngineObjectModelName(selected, name, sizeof(name)))
+                        snprintf(item_file, sizeof(item_file), "%s.bin", name);
+                }
+                if (item_file[0]) {
+                    held_pose.visible = true;
+                    held_pose.model = item_file;
+                    held_pose.scale = 0.6f;
+                    hands::WeaponFrame(g_hand[1], Config().world_scale, held_pose.r, held_pose.p);
+                    hands::Hand& h = g_hand[1];
+                    h.index = h.middle = h.ring = h.pinky = std::fmax(h.middle, 0.7f);
+                    h.thumb = std::fmax(h.thumb, 0.6f);
+                    item_in_hand = true;
+                    bow_pose.arrow_in_hand = false;
+                }
+            }
+        }
+        // The pouch at the waist, under the inventory there (wrist_hud).
+        {
+            Vec3 centre, right, forward;
+            if (Config().show_hands && wrist_hud::PouchPose(centre, right, forward)) {
+                Mat3 rot = tw_a;
+                const float inv = Config().world_scale > 0 ? 1.0f / Config().world_scale : 1.0f;
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        rot.m[i][j] *= inv;
+                Vec3 r = Normalize(rot * right), f = Normalize(rot * forward), u = Normalize(rot * Vec3{0, 1, 0});
+                for (int i = 0; i < 3; ++i) {
+                    pouch_pose.r.m[i][0] = (&u.x)[i];   // model x: up (the model lies on its side)
+                    pouch_pose.r.m[i][1] = (&f.x)[i];   // model y: forward
+                    pouch_pose.r.m[i][2] = -(&r.x)[i];  // model z: to the left
+                }
+                pouch_pose.p = tw_b + tw_a * centre;
+                pouch_pose.model = "lotpouch.bin";
+                pouch_pose.in_hand = false;
+                pouch_pose.visible = true;
+            }
+        }
         // Physical frob and throwing: the right hand's grip point and pointing (world).
         g_tracked_to_world = world_yaw * unyaw * XrToEngineBasis();
         g_right_hand_valid = located[1];
@@ -997,7 +1082,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
             g_right_hand_aim = world_yaw * unyaw * EngineOrientation(sm_aim[1].orientation) * Vec3{1, 0, 0};
             const float o[3] = {grip_w.x, grip_w.y, grip_w.z};
             const float d[3] = {g_right_hand_aim.x, g_right_hand_aim.y, g_right_hand_aim.z};
-            EngineSetHandRay(Config().hand_frob, o, d);
+            EngineSetHandRay(Config().hand_frob, o, d, Config().hand_frob_reach_cm / 30.48f);
         } else {
             EngineSetHandRay(false, nullptr, nullptr);
         }
@@ -1041,7 +1126,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
     // hit spheres are moved onto it (WeaponPointToHand).
     hands::WeaponPose weapon_pose;
     g_drawn_weapon_until = 0;
-    if (g_hands_replace_arm && limb == 2 && g_hand[1].visible) {
+    if (g_hands_replace_arm && limb == 2 && g_hand[1].visible && !item_in_hand) {
         weapon_pose.kind = hands::ArmWeapon();
         hands::WeaponFrame(g_hand[1], Config().world_scale, weapon_pose.r, weapon_pose.p);
         if (weapon_pose.kind != hands::Weapon::None) {
@@ -1097,7 +1182,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         }
         if (hands_on) {
             hands::Eye he{engine_eye_rot, {p.x, p.y, p.z}, (eye_h * 0.5f) / tan_v, eye_w * 0.5f, eye_h * 0.5f};
-            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, bow_pose, held_pose,
+            hands::Draw(dev, target, g_eye_depth, he, g_hand[0], g_hand[1], weapon_pose, bow_pose, held_pose, pouch_pose,
                         Config().hand_brightness);
         }
         if (g_eye_msaa)

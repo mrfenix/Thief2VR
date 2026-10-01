@@ -34,6 +34,12 @@ const EngineAddresses& Engine();
 // False while the game ignores player control (menus, cutscenes, dead...).
 bool EngineInputAllowed();
 
+// The player's movement mode (control struct DAT_00aa1444 + 0x24): 0 stand,
+// 1 crouch, 2 swim, 3 climb (ladder / rope), 4 carrying a body, 5 slide,
+// 6 jump, 7 dead; -1 when unknown.
+int EnginePlayerMode();
+constexpr int kPlayerModeClimb = 3;
+
 // Analog movement, -1..1 each (1 = full speed forward / right). Applied through
 // the same player-control path the joystick uses.
 void EngineSetMovement(float forward, float right);
@@ -147,6 +153,8 @@ bool EngineHudLayout(int canvas[2], int rect[2][4], int object[2], int hidden[2]
 void EngineLogHudLayout();
 // The highlighted frob target (DAT_00aa1e08), or 0.
 int EngineFrobTarget();
+// The selected inventory item (the item slot), or 0.
+int EngineSelectedItem();
 // The non-loot object the player is holding (picked up "junk": a bottle, a
 // crate...), or 0.
 int EngineHeldJunk();
@@ -156,7 +164,7 @@ void EngineHideItemSlot(bool hide);
 // Physical frob: the hand's position and pointing (world). Each frame while
 // valid, the frob target is what the hand touches or points at instead of what
 // the view centres on (valid = false: the game's own pick).
-void EngineSetHandRay(bool valid, const float origin[3], const float dir[3]);
+void EngineSetHandRay(bool valid, const float origin[3], const float dir[3], float reach_ft = 2.0f);
 // Physical throwing: the next thrown item (within 300 ms) leaves from the
 // camera + offset (feet, world) along dir, its power scaled by power_scale.
 void EngineSetThrow(const float offset[3], const float dir[3], float power_scale);

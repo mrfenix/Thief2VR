@@ -96,11 +96,13 @@ struct HeldPose {
     const char* model = nullptr;
     Mat3 r;
     Vec3 p;
+    bool in_hand = true;  // false: centred at p at its own size (e.g. the pouch at the waist)
+    float scale = 1.0f;   // in the hand: on top of the usual size
 };
 
 void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* color, IDirect3DSurface9* depth, const Eye& eye,
           const Hand& left, const Hand& right, const WeaponPose& weapon, const BowPose& bow, const HeldPose& held,
-          float brightness);
+          const HeldPose& pouch, float brightness);
 
 // True once the game's weapon models were loaded (on the first Draw).
 bool WeaponModelsLoaded();

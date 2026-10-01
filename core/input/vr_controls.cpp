@@ -115,6 +115,18 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     float d = s.move_follows_head ? head.rel_heading : 0.0f;
     float forward = (stick.y * std::cos(d) + stick.x * std::sin(d)) * speed;
     float right = (stick.x * std::cos(d) - stick.y * std::sin(d)) * speed;
+    // Climbing (a ladder or rope): the engine climbs in the direction the body
+    // looks (look up and go forward to climb up). That pitch follows the hand
+    // here, so instead: stick forward climbs up, back climbs down (the look
+    // pitch is set to match below), wherever you look or point.
+    const bool climbing = EnginePlayerMode() == kPlayerModeClimb;
+    float climb_pitch = 0;
+    if (climbing) {
+        const float kClimbPitch = 60.0f * kPi / 180.0f;
+        climb_pitch = stick.y >= 0 ? -kClimbPitch : kClimbPitch;  // positive = down
+        forward = std::fabs(stick.y) * speed;
+        right = stick.x * speed;
+    }
     if (s.invert_strafe)
         right = -right;
     if (stick.x != 0 || stick.y != 0) {
@@ -170,6 +182,8 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         } else {
             EngineSetAimYaw(0);  // body faces the tracking forward
         }
+        if (climbing)
+            EngineSetLookPitch(climb_pitch);
     }
 
     // --- Right stick up / down: jump, toggle crouch ---
@@ -301,20 +315,38 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     //     Without "Throw by swinging" the use is at once, and a throw leaves
     //     the hand where it points.
     const bool grip_use = grip && !grip_draws;
-    static bool grip_use_was, throw_hold;
+    // What the squeeze does, decided as it starts:
+    //   use:    "use item" held while squeezed (doors, levers; an inventory
+    //           item selected, e.g. lockpicks on a lock);
+    //   tapped: a world frob with no item selected - "use" tapped at once (the
+    //           game frobs on the release), so a picked-up object is in the hand
+    //           while the grip is still squeezed;
+    //   throw:  nothing highlighted, or holding a picked-up object - let go to
+    //           throw / drop it.
+    enum GripMode { kGripNone, kGripUse, kGripTapped, kGripThrow };
+    static GripMode mode = kGripNone;
+    static bool grip_use_was;
     static int use_tap;  // a tap of "use item": 2 = press this frame, 1 = release
-    bool want_use = grip_use;
     if (grip_use && !grip_use_was) {
-        bool nothing_highlighted = EngineFrobTarget() == 0;
-        throw_hold = s.swing_to_throw && nothing_highlighted;
-        float offset[3], aim[3];
-        if (!s.swing_to_throw && nothing_highlighted && StereoRightHand(offset, aim))
-            EngineSetThrow(offset, aim, 1.0f);
+        bool highlighted = EngineFrobTarget() != 0, holding = EngineHeldJunk() != 0;
+        if (s.swing_to_throw && (!highlighted || holding)) {
+            mode = kGripThrow;
+        } else if (s.swing_to_throw && EngineSelectedItem() == 0) {
+            mode = kGripTapped;
+            use_tap = 2;
+        } else {
+            mode = kGripUse;
+            float offset[3], aim[3];
+            if (!highlighted && StereoRightHand(offset, aim))
+                EngineSetThrow(offset, aim, 1.0f);  // a throw on the press leaves the hand
+        }
     }
-    if (throw_hold) {
-        want_use = false;
-        if (!grip_use) {
-            throw_hold = false;
+    // The tap picked something up: it's held while squeezed, let go to throw / drop it.
+    if (mode == kGripTapped && grip_use && use_tap == 0 && EngineHeldJunk() != 0)
+        mode = kGripThrow;
+    bool want_use = mode == kGripUse && grip_use;
+    if (!grip_use) {
+        if (mode == kGripThrow) {
             float offset[3], aim[3], v[3];
             if (StereoRightHand(offset, aim)) {
                 Vec3 velocity{};
@@ -327,6 +359,7 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
             }
             use_tap = 2;
         }
+        mode = kGripNone;
     }
     if (use_tap > 0)
         want_use = use_tap-- == 2;

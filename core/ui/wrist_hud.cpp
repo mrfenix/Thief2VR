@@ -2,6 +2,7 @@
 
 #include "../config/settings.h"
 #include "../engine/engine.h"
+#include "../input/vr_controls.h"
 #include "../vrmath.h"
 #include "../xr/xr_input.h"
 
@@ -22,6 +23,11 @@ const int kCells[kCuts][4] = {
 
 float g_scale = 1;  // HUD image pixels per canvas pixel (the capture scale)
 bool g_shown[2];    // per wrist (0 left, 1 right), with hysteresis
+// The waist (inventory and pouch): its forward direction follows the head's
+// slowly, so it stays at your front left without swinging with every glance.
+bool g_waist_valid, g_pouch_valid;
+bool g_item_shown, g_item_known;  // the item slot showed in the last capture
+Vec3 g_waist_forward, g_pouch_centre, g_pouch_right;
 
 Quat QuatFromColumns(Vec3 x, Vec3 y, Vec3 z)
 {
@@ -94,11 +100,63 @@ int Layers(const TransferCut cuts[kCuts], XrSwapchain atlas, XrSpace space, XrTi
            XrCompositionLayerQuad out[kCuts])
 {
     const Settings& s = Config();
-    if (!s.wrist_hud || atlas == XR_NULL_HANDLE)
+    g_pouch_valid = false;
+    g_item_known = s.wrist_hud && atlas != XR_NULL_HANDLE;
+    g_item_shown = g_item_known && cuts[kItem].found;
+    if (!g_item_known)
         return 0;
     const Quat head_q{head.orientation.x, head.orientation.y, head.orientation.z, head.orientation.w};
     const Vec3 head_pos = ToVec(head.position), head_fwd = Rotate(head_q, {0, 0, -1});
     int count = 0;
+
+    // --- The general inventory at the waist, front left, above the pouch ---
+    const bool waist = s.waist_inventory;
+    if (waist) {
+        Vec3 level{head_fwd.x, 0, head_fwd.z};
+        if (Length(level) > 0.1f) {
+            level = Normalize(level);
+            if (!g_waist_valid || Dot(level, g_waist_forward) < 0.5f)
+                g_waist_forward = level;  // a big turn: straight there
+            else
+                g_waist_forward = Normalize(g_waist_forward + (level - g_waist_forward) * 0.03f);
+            g_waist_valid = true;
+        }
+        if (g_waist_valid) {
+            const Vec3 up{0, 1, 0};
+            Vec3 right = Cross(g_waist_forward, up);
+            Vec3 base = head_pos + g_waist_forward * (s.waist_forward_cm * 0.01f) - right * (s.waist_left_cm * 0.01f) -
+                        up * (s.waist_down_cm * 0.01f);
+            g_pouch_centre = base;
+            g_pouch_right = right;
+            g_pouch_valid = s.waist_pouch;
+            const TransferCut& c = cuts[kItem];
+            if (c.found) {
+                // Facing you, just above the pouch.
+                const float px = 0.00028f * s.waist_size / g_scale;
+                int bw = c.box[2] - c.box[0], bh = c.box[3] - c.box[1];
+                Vec3 p = base + up * (0.05f + bh * px * 0.5f);
+                Vec3 z = Normalize(head_pos - p);
+                Vec3 x = Normalize(Cross(up, z));
+                Vec3 y = Cross(z, x);
+                Quat orient = QuatFromColumns(x, y, z);
+                XrCompositionLayerQuad& quad = out[count++];
+                quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+                quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                quad.space = space;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.subImage.swapchain = atlas;
+                quad.subImage.imageRect = {{c.cell[0], c.cell[1]}, {bw, bh}};
+                quad.pose = {{orient.x, orient.y, orient.z, orient.w}, {p.x, p.y, p.z}};
+                quad.size = {bw * px, bh * px};
+            }
+        }
+    }
+
+    // Not while drawing the bow (the bow hand's wrist is in view while aiming).
+    if (ControlsBowDrawSeconds() >= 0) {
+        g_shown[0] = g_shown[1] = false;
+        return count;
+    }
     for (int side = 0; side < 2; ++side) {
         // The wrist's settings (VR menu, HUD tab).
         const float size_setting = side == 0 ? s.wrist_left_size : s.wrist_right_size;
@@ -167,7 +225,11 @@ int Layers(const TransferCut cuts[kCuts], XrSwapchain atlas, XrSpace space, XrTi
             const TransferCut& c = cuts[cut];
             return c.found ? (height ? c.box[3] - c.box[1] : c.box[2] - c.box[0]) * px * scale_of(cut) : 0.0f;
         };
-        if (side == 0) {
+        if (side == 0 && waist) {
+            // Left wrist: the health row, with the light gem above it.
+            add(kHealth, 0, 0);
+            add(kGem, 0, size(kHealth, true) * 0.5f + 0.008f + size(kGem, true) * 0.5f);
+        } else if (side == 0) {
             // Left wrist: the health row, with the light gem and the item above it.
             float row = std::fmax(size(kGem, true), size(kItem, true));
             add(kHealth, 0, 0);
@@ -179,6 +241,22 @@ int Layers(const TransferCut cuts[kCuts], XrSwapchain atlas, XrSpace space, XrTi
         }
     }
     return count;
+}
+
+bool PouchPose(Vec3& centre, Vec3& right, Vec3& forward)
+{
+    if (!g_pouch_valid)
+        return false;
+    centre = g_pouch_centre;
+    right = g_pouch_right;
+    forward = g_waist_forward;
+    return true;
+}
+
+bool ItemShown(bool& known)
+{
+    known = g_item_known;
+    return g_item_shown;
 }
 
 }  // namespace wrist_hud

@@ -3,8 +3,9 @@ Thief2VR - VR for Thief 2: The Metal Age
 
 Play Thief 2 in VR with head tracking, hand tracking and motion controls:
 swing the sword and blackjack with your hand, draw the bow (one or two
-handed), lean and crouch with your body, and navigate every game menu, the
-map and objectives with a laser pointer.
+handed), pick things up and throw them with your hand, lean and crouch with
+your body, check the light gem and health on your wrist, and navigate every
+game menu, the map and objectives with a laser pointer.
 
 
 REQUIREMENTS
@@ -55,17 +56,33 @@ CONTROLS
   Right stick click        Map
   Right trigger            Use weapon (hold to draw the bow, release to fire)
   Swing your right hand    Attack with the sword / blackjack
-  Right grip               Frob: pick up, open, use the selected item
+  Right grip               Frob what your hand touches or points at:
+                           pick up, open, use the selected item
+  Right grip (crates,      Hold to carry it in your hand; let go to drop
+   bottles...)             it, or swing and let go to throw it
+  Right grip, nothing      Hold, swing and let go to throw the selected
+   highlighted             item (flash bombs, mines...)
   Left trigger             Block
   Left grip                Hold crouch
   A / B                    Next weapon / put the weapon away
-  X / Y                    Next / previous item
+  X / Y                    Next / previous item (shown in your hand)
   Hold Y                   Objectives
   Left menu button         Tap: game menu. Hold: VR menu
   Crouch / lean for real   Crouch / lean in the game
-  Two-handed bow           Optional (VR menu, Hands tab): bow in the left
-                           hand; squeeze the right grip at the bow, pull
-                           back, let go.
+  Ladders and ropes        Left stick forward climbs up, back climbs down;
+                           jump or crouch to let go
+  Bow (two-handed)         Bow in the left hand; squeeze the right grip at
+                           the bow (an arrow appears in your hand), pull
+                           back, let go. One-handed: Hands tab.
+
+
+THE HUD ON YOUR BODY
+--------------------
+- Look at your left wrist for the light gem and health, at your right
+  wrist for the selected weapon.
+- The inventory sits at your left waist, above a pouch.
+- Sizes, positions and the viewing angle are in the VR menu's HUD tab;
+  the inventory can go back on the left wrist there.
 
 
 PERFORMANCE
@@ -92,6 +109,9 @@ TROUBLESHOOTING
   "Vertical head tracking" (View tab) can be turned off to always use the
   game's eye height.
 - The weapon feels twitchy: raise "Weapon smoothing" (Hands tab).
+- Sounds turn with your hand instead of your head: the game is using
+  software sound mixing. The installer sets "snd3d openal" (or "a3d") in
+  cam_ext.cfg; check that it's there.
 - Your settings are in thief2vr.ini in the game folder; delete it to go back
   to the defaults. The log is thief2vr.log.
 

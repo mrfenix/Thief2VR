@@ -69,6 +69,7 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 | Input-variable table | 0x89ee88… | 140-byte entries: name[] +0, handler +0x64 = `int __cdecl(char* name, char* value)` |
 | Set forward / strafe speed | 0x54de40 / 0x54de90 | cdecl float, -2..2; control struct `DAT_00aa1444` +0x14 / +0x18 |
 | Apply player control | 0x54ec10 | **stdcall** (RET 4), arg = control struct |
+| Player mode | `DAT_00aa1444` +0x24 | 0 stand, 1 crouch, 2 swim, 3 climb (ladder / rope; "Event Climbstep" in `FUN_0054e430`), 4 carrying a body, 5 slide, 6 jump, 7 dead. Climbing goes the way the body looks (pitch), so Thief2VR sets the pitch from the stick while climbing |
 | Player object | `DAT_00aa1418` | object id |
 | Physics model of object | 0x507d70 | **stdcall** (RET 4); model+0xf0 → look angles bank/pitch/heading at +0x10/+0x12/+0x14 |
 | Player camera update | 0x546ca0 | cdecl void; adds look heading (then zeroed) to the player's facing; pitch persists. Hooked to set turns / aim |

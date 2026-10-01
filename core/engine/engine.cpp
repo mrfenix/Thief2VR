@@ -280,6 +280,14 @@ bool EngineInputAllowed()
     return ctrl && reinterpret_cast<int*>(ctrl)[9] != 7;
 }
 
+int EnginePlayerMode()
+{
+    if (!g_input_ok)
+        return -1;
+    int ctrl = *g_player_control;
+    return ctrl ? reinterpret_cast<int*>(ctrl)[9] : -1;  // DAT_00aa1444 + 0x24
+}
+
 void EngineSetMovement(float forward, float right)
 {
     if (!EngineInputAllowed())
@@ -1312,6 +1320,7 @@ void EngineSetThrow(const float offset[3], const float dir[3], float power_scale
 static bool g_hand_ray_valid;
 static ULONGLONG g_hand_ray_until;
 static float g_hand_origin[3], g_hand_dir[3];
+static float g_hand_reach = 2.0f;  // ft: how far from the hand an object can be
 static float g_hand_pick_best = 1e30f;
 static void* g_pick_candidate_tramp;   // FUN_0058fe80
 static void* g_pick_reset_tramp;       // FUN_0058fed0
@@ -1347,6 +1356,8 @@ static float HandPickScore(int obj)
     const float kTouch = 1.0f;  // ft: the hand is on it
     if (dist < kTouch)
         return dist * 0.1f;
+    if (dist > g_hand_reach)
+        return -1;
     float along = v[0] * g_hand_dir[0] + v[1] * g_hand_dir[1] + v[2] * g_hand_dir[2];
     if (along < 0.1f)
         return -1;
@@ -1412,11 +1423,12 @@ static void __cdecl PickResetDetour()
     g_hand_pick_best = 1e30f;
 }
 
-void EngineSetHandRay(bool valid, const float origin[3], const float dir[3])
+void EngineSetHandRay(bool valid, const float origin[3], const float dir[3], float reach_ft)
 {
     g_hand_ray_valid = valid && g_pick_candidate_tramp;
     if (!g_hand_ray_valid)
         return;
+    g_hand_reach = reach_ft;
     for (int i = 0; i < 3; ++i) {
         g_hand_origin[i] = origin[i];
         g_hand_dir[i] = dir[i];
@@ -1447,6 +1459,19 @@ static void InstallPickHooks()
     if (st != MH_OK)
         g_pick_candidate_tramp = nullptr;
     Log("Engine: frob pick hooks %s", MH_StatusToString(st));
+}
+
+int EngineSelectedItem()
+{
+    // IInventory (DAT_00a9f9fc) vtbl 0x1c Selection(which): 1 = the item slot.
+    void** inv = g_base ? *reinterpret_cast<void***>(g_base + 0x69f9fc) : nullptr;
+    if (!inv)
+        return 0;
+    __try {
+        return reinterpret_cast<int(__stdcall*)(void*, int)>((*reinterpret_cast<void***>(inv))[0x1c / 4])(inv, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
 int EngineHeldJunk()
