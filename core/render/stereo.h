@@ -59,6 +59,10 @@ bool StereoBowAim(float& heading, float& pitch);
 // game camera (feet, world axes) and its pointing (unit, world). False if not
 // tracked.
 bool StereoRightHand(float offset[3], float aim[3]);
+
+// A hand's grip point in the world (feet), as of the last frame; side 0 left,
+// 1 right. False when it isn't tracked.
+bool StereoHandWorld(int side, float pos[3]);
 // A tracked direction / velocity (LOCAL space) in world axes (rotation only).
 bool StereoTrackedDirToWorld(const XrVector3f& v, float out[3]);
 

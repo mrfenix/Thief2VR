@@ -44,7 +44,8 @@ constexpr int kPlayerModeClimb = 3;
 // the same player-control path the joystick uses.
 void EngineSetMovement(float forward, float right);
 
-// Presses (true) or releases an input the game binds keys to, by name:
+// Presses (true) or releases an input the game binds keys to, by name (for
+// "crouch", a toggle, only a press: each call toggles):
 // "jump", "crouch", "crouchhold", "leanleft", "leanright", "runon",
 // "use_weapon", "use_item", "block", "lookcenter". Returns false if unknown.
 bool EngineInput(const char* name, bool pressed);
@@ -155,6 +156,41 @@ void EngineLogHudLayout();
 int EngineFrobTarget();
 // The selected inventory item (the item slot), or 0.
 int EngineSelectedItem();
+
+// --- Physical interaction (hands on doors, levers, ladders) ---------------
+
+// The player's position (world feet). False until in a mission.
+bool EnginePlayerPosition(float out[3]);
+
+// An object's box: its model's bounding box (model units) placed at the
+// object's position and facing. False if it has no model (or it can't be read).
+bool EngineObjectBox(int obj, float pos[3], float rot[9], float bmin[3], float bmax[3]);
+
+// Distance (feet) from a world point to an object's box (0 inside), or -1 if
+// it has no box.
+float EngineObjectBoxDistance(int obj, const float p[3]);
+
+// What a hand can push or pull: a door (the RotDoor / TransDoor properties),
+// a lever or a button (by model name).
+enum { kGestureNone, kGestureDoor, kGestureLever, kGestureButton };
+int EngineGestureKind(int obj);
+
+// The nearest climbable object (a ladder: a physics box with climbable sides;
+// a rope or vine) within radius (feet) of a world point, and its closest point.
+// 0 if none.
+int EngineFindClimbable(const float p[3], float radius, float closest[3]);
+
+// While climbing: the ladder / rope's point closest to p. False otherwise.
+bool EngineClimbTarget(const float p[3], float closest[3]);
+
+// Gets the player onto a ladder / rope it's touching and facing (the engine's
+// own check). True if it did.
+bool EngineTryClimb();
+
+// A rotating door's hinge line (world, a point on it; the door turns about z),
+// worked out from where the door property says it stands closed and open.
+// False for other doors (sliding ones, or a door not turning about z).
+bool EngineDoorHinge(int obj, float hinge[3]);
 // The non-loot object the player is holding (picked up "junk": a bottle, a
 // crate...), or 0.
 int EngineHeldJunk();

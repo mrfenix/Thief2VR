@@ -32,6 +32,9 @@ struct Model {
 // looked up by the materials' names in the archive's txt16 / txt folders.
 bool Load(const char* name, Model& out);
 
+// Only a model's bounding box (model units, feet), from its header.
+bool LoadBounds(const char* name, Vec3& bbox_min, Vec3& bbox_max);
+
 // Decodes an image file in memory (PNG, GIF, ...) into A8R8G8B8 pixels.
 bool DecodeImage(const void* data, size_t size, Texture& out);
 

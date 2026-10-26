@@ -190,3 +190,30 @@ Rotation composition is Z·Y·X (heading, then pitch, then bank). World axes are
 2. BeginScene from the frame render.
 3. Inside the scene render: Clear(target|z|stencil), then world polys (FVF 0x1c4 stride 32, pre-transformed), then objects (FVF 0x2c4 stride 40).
 4. The scene render returns. Overlays/HUD are drawn from the frame render (0x6112aa/0x6236ac), then EndScene. There's no SetRenderTarget call: everything goes to the back buffer.
+
+
+## Doors, levers, ladders and ropes (physical interaction)
+
+- **Doors:** the RotDoor and TransDoor properties are at `DAT_0099b6f8` / `DAT_0099b6f0` (created by `FUN_0053ffe0` / `FUN_00540470`). IProperty vtbl 0x24 is IsRelevant(obj), `__stdcall(this, obj)`: true if the object or an archetype has the property. A door's frob toggles it.
+- **Levers and buttons** have no common property. Thief2VR tells them by model name (`IRONLEV`, `LEVER01`, `levmol`, `VSWITCH1`; `BUTTON*`, `buttgrn`, `ELEVBUT`, `knobmol`).
+- **Object boxes:** a model's bounding box is in its LGMD header (bbox max at +24, min at +36), placed at the object's position and angles (Z·Y·X).
+- **Player mode setter:** `FUN_0054e1c0`(control struct; mode in ESI) writes `DAT_00aa1444` +0x24.
+- **Climbing starts in `FUN_00508d50`(obj)** ("try to climb"). It looks at the object's physics contacts and grabs:
+  - an OBB model (vtbl 8 `__thiscall(model, 0)` == 3) whose touched side is set in the climbable-sides mask (+0x20c);
+  - or a rope (model flags +0x20 & 0x4000; segments are the sub-models, count +0x10, locations `*(model+0xf0)` every 0x48 bytes).
+
+  It then sets the climbing object (model +0xac, `DAT_00aa144c` +0x14) and mode 3. It's called from the collision handler `FUN_005194d0` on contact, when the player has no control input or `climb_touch` is set. So the player gets on by touching the ladder or rope while moving into it. Thief2VR's "grab to get on" moves the player into the one near the hand.
+- **Physics model of an object:** `FUN_00507d70` (`__stdcall`, RET 4).
+
+
+## Gamma
+
+- The game's gamma option sets the monitor's gamma ramp through `IDirect3DDevice9::SetGammaRamp` (vtable slot 21). It never reaches the eye images, which are rendered to their own targets.
+- Thief2VR hooks it and reads the ramp's middle (`green[128]`). It takes the exponent `e = ln v / ln(128/255)` (`out = in^e`) and applies it in its own per-eye pass (`core/render/world_gamma.cpp`), together with the headset gamma and brightness settings.
+- Until the game sets a ramp (it may not in a window), the fallback is `gamma` from `cam.cfg`, as `e = 1 / gamma`.
+
+## Toggle crouch
+
+- The "crouch" input handler (`FUN_00432650`) is `cdecl(name, value, fresh)`. It toggles crouch on every call, whatever the value. The key binding (`bind x crouch`, no `+`) calls it only on a press.
+- With `crouch_norepeat` set (`DAT_00a9f86c`), it acts only when `fresh` (a new press, not a repeat) is nonzero.
+- So a toggle is one press call with `fresh = 1`, and no release. A press + release pair toggles twice.

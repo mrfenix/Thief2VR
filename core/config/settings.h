@@ -18,7 +18,10 @@
     X(float, position_clamp_ft, 1.0f, 0.0f, 3.0f, "View", "Max head offset from body (ft)")                     \
     X(bool, invert_roll, false, 0, 1, "View", "Invert head roll")                                               \
     X(bool, desktop_mirror, true, 0, 1, "View", "Show the game in the desktop window during missions")          \
-    X(float, mirror_fps, 30.0f, 5.0f, 90.0f, "View", "Desktop window frame rate during missions (fps)")              \
+    X(float, mirror_fps, 30.0f, 5.0f, 90.0f, "View", "Desktop window frame rate during missions (fps)")             \
+    X(float, world_gamma, 1.0f, 0.5f, 2.5f, "View", "Headset gamma (higher = brighter shadows)")                    \
+    X(float, world_brightness, 1.0f, 0.5f, 2.0f, "View", "Headset brightness")                                      \
+    X(bool, follow_game_gamma, true, 0, 1, "View", "Also apply the game's own gamma option in the headset")         \
     X(bool, snap_turn, true, 0, 1, "Comfort", "Snap turn (off = smooth turn)")                                  \
     X(float, snap_turn_angle, 30.0f, 10.0f, 90.0f, "Comfort", "Snap turn angle (deg)")                          \
     X(float, smooth_turn_speed, 120.0f, 30.0f, 360.0f, "Comfort", "Smooth turn speed (deg/s)")                  \
@@ -31,6 +34,8 @@
     X(bool, show_hands, true, 0, 1, "Hands", "Show both hands (the weapon in the right hand, no arm)")               \
     X(bool, hand_frob, true, 0, 1, "Hands", "Frob what your hand touches or points at (off = where you look)")       \
     X(float, hand_frob_reach_cm, 78.0f, 20.0f, 200.0f, "Hands", "Frob reach from the hand (cm)")                     \
+    X(bool, hand_gestures, true, 0, 1, "Hands", "Push / pull doors, levers and buttons with your hand")             \
+    X(bool, hand_climb, true, 0, 1, "Hands", "Grab ladders and ropes and climb them with your hands")            \
     X(bool, swing_to_throw, true, 0, 1, "Hands", "Throw by swinging (hold the grip, swing, let go)")                 \
     X(float, hand_brightness, 1.0f, 0.2f, 2.0f, "Hands", "Hand brightness")                                          \
     X(float, hand_forward_cm, 0.0f, -15.0f, 15.0f, "Hands", "Hand position: forward (cm)")                           \
@@ -85,7 +90,21 @@
     X(float, hud_vertical_offset, -0.38f, -1.0f, 1.0f, "HUD", "HUD vertical offset (m)")                        \
     X(float, hud_capture_scale, 0.76f, 0.25f, 1.0f, "HUD", "HUD resolution (fraction of game resolution)")       \
     X(float, screen_distance, 2.0f, 0.5f, 5.0f, "HUD", "Menu screen distance (m)")                              \
-    X(float, screen_width, 2.4f, 0.5f, 6.0f, "HUD", "Menu screen width (m)")
+    X(float, screen_width, 2.4f, 0.5f, 6.0f, "HUD", "Menu screen width (m)")                                        \
+    /* Button bindings (input/bindings.h: BindButton numbers; shown in the Controls tab) */                         \
+    X(int, bind_jump, 8, 0, 11, "Controls", "Jump")                                                                 \
+    X(int, bind_crouch_toggle, 9, 0, 11, "Controls", "Toggle crouch")                                               \
+    X(int, bind_crouch_hold, 11, 0, 11, "Controls", "Hold crouch")                                                  \
+    X(int, bind_block, 10, 0, 11, "Controls", "Block")                                                              \
+    X(int, bind_run_toggle, 6, 0, 11, "Controls", "Toggle run")                                                     \
+    X(int, bind_next_weapon, 1, 0, 11, "Controls", "Next weapon")                                                   \
+    X(int, bind_put_away, 2, 0, 11, "Controls", "Put the weapon away")                                              \
+    X(int, bind_next_item, 3, 0, 11, "Controls", "Next item")                                                       \
+    X(int, bind_prev_item, 4, 0, 11, "Controls", "Previous item")                                                   \
+    X(int, bind_objectives, 4, 0, 11, "Controls", "Objectives (hold)")                                              \
+    X(int, bind_map, 7, 0, 11, "Controls", "Map")                                                                   \
+    X(int, bind_game_menu, 5, 0, 11, "Controls", "Game menu")                                                       \
+    X(int, bind_vr_menu, 5, 1, 11, "Controls", "VR menu (hold)")
 
 struct Settings {
 #define SETTINGS_FIELD(type, name, def, lo, hi, tab, label) type name = def;

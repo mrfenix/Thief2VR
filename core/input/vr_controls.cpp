@@ -2,6 +2,7 @@
 
 #include "../config/settings.h"
 #include "../engine/engine.h"
+#include "bindings.h"
 #include "../log.h"
 #include "../render/stereo.h"
 #include "../vrmath.h"
@@ -37,7 +38,7 @@ struct Edge {
 
 HeldInput g_use_weapon{"use_weapon"}, g_use_item{"use_item"}, g_block{"block"};
 HeldInput g_crouch_hold{"crouchhold"}, g_jump{"jump"}, g_lean_left{"leanleft"}, g_lean_right{"leanright"};
-Edge g_snap, g_crouch_toggle, g_run_toggle, g_map, g_a, g_b, g_x;
+Edge g_snap;
 bool g_run_on;
 bool g_moving;
 double g_strike_time = -1;  // seconds the melee hit window has been open, -1 closed
@@ -86,6 +87,35 @@ XrVector2f Deadzone(XrVector2f v, float dz)
     return {v.x / len * scaled, v.y / len * scaled};
 }
 
+// Whether a world point is at a door's handle: near the door, towards the
+// upright edge away from its hinge (either edge if that isn't known, e.g. a
+// sliding door), at hand height. Its face direction (world, the door's thin
+// axis) goes in normal.
+bool AtDoorHandle(int door, const float p[3], Vec3& normal)
+{
+    float pos[3], rot[9], bmin[3], bmax[3];
+    if (!EngineObjectBox(door, pos, rot, bmin, bmax))
+        return false;
+    float d[3] = {p[0] - pos[0], p[1] - pos[1], p[2] - pos[2]};
+    float local[3];
+    for (int j = 0; j < 3; ++j)
+        local[j] = d[0] * rot[0 * 3 + j] + d[1] * rot[1 * 3 + j] + d[2] * rot[2 * 3 + j];
+    const int wide = bmax[0] - bmin[0] >= bmax[1] - bmin[1] ? 0 : 1, thin = 1 - wide;
+    normal = {rot[0 * 3 + thin], rot[1 * 3 + thin], rot[2 * 3 + thin]};
+    float half = (bmax[wide] - bmin[wide]) * 0.5f, mid = (bmax[wide] + bmin[wide]) * 0.5f;
+    float edge = half > 0 ? std::fabs(local[wide] - mid) / half : 0;  // 0 middle, 1 edge
+    float hinge[3];
+    if (EngineDoorHinge(door, hinge)) {
+        float h = (hinge[0] - pos[0]) * rot[0 * 3 + wide] + (hinge[1] - pos[1]) * rot[1 * 3 + wide] +
+                  (hinge[2] - pos[2]) * rot[2 * 3 + wide];
+        if ((h - mid) * (local[wide] - mid) > 0)
+            return false;  // the hinge side
+    }
+    float height = bmax[2] > bmin[2] ? (local[2] - bmin[2]) / (bmax[2] - bmin[2]) : 0;
+    float off_face = std::fabs(local[thin] - (bmax[thin] + bmin[thin]) * 0.5f) - (bmax[thin] - bmin[thin]) * 0.5f;
+    return edge > 0.7f && edge < 1.1f && height > 0.3f && height < 0.6f && off_face < 0.35f;
+}
+
 } // namespace
 
 XrControllerState g_last_state;
@@ -105,9 +135,110 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         ReleaseAll();
         return;
     }
+    // --- Climbing with the hands. A grip on a ladder or rope grabs it: off it,
+    //     the player moves onto the one near the hand (the engine climbs on
+    //     touching it); on it, pulling the hand down climbs up and pushing it up
+    //     climbs down, hand over hand. Not with the bow out (the grips draw it;
+    //     the stick still climbs), and the right grip only with nothing to frob.
+    //     A grip taken here isn't a frob / crouch until it's let go.
+    const bool climbing = EnginePlayerMode() == kPlayerModeClimb;
+    const bool bow_out = EngineLimbMode() == 1;
+    static bool climb_grip[2], climb_grip_was[2], grip_taken[2];
+    static int climb_hand = -1;       // the hand pulling, -1 none
+    static float climb_hand_y;        // its tracked height last frame (m)
+    static float climb_target_z;      // where the pulls put the player (world ft)
+    static double attach_time = -1;   // >= 0 while moving onto a grabbed ladder
+    static float attach_point[3];     // where to stand to get on (world)
+    static float attach_face;         // the heading that faces it
+    float player[3];
+    const bool have_player = EnginePlayerPosition(player);
+    for (int side = 0; side < 2; ++side) {
+        Analog(climb_grip[side], c.grip[side]);
+        bool pressed = climb_grip[side] && !climb_grip_was[side];
+        climb_grip_was[side] = climb_grip[side];
+        if (!climb_grip[side]) {
+            grip_taken[side] = false;
+            if (climb_hand == side)
+                climb_hand = grip_taken[1 - side] ? 1 - side : -1;
+            continue;
+        }
+        bool free_hand = side == 0 || (EngineFrobTarget() == 0 && EngineHeldJunk() == 0);
+        if (!pressed || !s.hand_climb || bow_out || !free_hand || !c.pose_valid[side] || !have_player)
+            continue;
+        float hand[3], point[3];
+        int found = 0;
+        if (!climbing && StereoHandWorld(side, hand)) {
+            found = EngineFindClimbable(hand, 1.5f, point);
+        }
+        if (climbing || found) {
+            grip_taken[side] = true;
+            if (climb_hand < 0)
+                climb_target_z = player[2];
+            climb_hand = side;
+            climb_hand_y = c.grip_pose[side].position.y;
+            XrControls().Vibrate(side, 0.4f, 0.04f);
+            if (!climbing) {
+                // A ladder: just off its face on the player's side (also from
+                // above, stepping off a ledge onto it), facing it. A rope: at it.
+                attach_time = 0;
+                float pos[3], rot[9], bmin[3], bmax[3];
+                float nx = point[0] - player[0], ny = point[1] - player[1];
+                attach_point[0] = point[0], attach_point[1] = point[1], attach_point[2] = point[2];
+                if (EngineObjectBox(found, pos, rot, bmin, bmax)) {
+                    int thin = bmax[0] - bmin[0] <= bmax[1] - bmin[1] ? 0 : 1;
+                    float ax = rot[0 * 3 + thin], ay = rot[1 * 3 + thin];
+                    float alen = std::sqrt(ax * ax + ay * ay);
+                    if (alen > 1e-3f) {
+                        ax /= alen, ay /= alen;
+                        float from = (player[0] - pos[0]) * ax + (player[1] - pos[1]) * ay >= 0 ? 1.0f : -1.0f;
+                        nx = -ax * from, ny = -ay * from;  // towards the ladder
+                        attach_point[0] = point[0], attach_point[1] = point[1];
+                    }
+                }
+                attach_face = std::atan2(ny, nx);
+            }
+        }
+    }
+    if (climb_hand >= 0 && (bow_out || !c.pose_valid[climb_hand]))
+        climb_hand = -1;
+    // Off the ladder: move to just in front of it, facing it, and let the engine
+    // grab it (as on touching it); for up to 2 s.
+    float attach_forward = 0, attach_right = 0;
+    if (attach_time >= 0) {
+        attach_time += dt;
+        if (!climbing)
+            EngineTryClimb();
+        if (EnginePlayerMode() == kPlayerModeClimb || attach_time > 2.0 || !have_player) {
+            attach_time = -1;
+        } else {
+            float dx = attach_point[0] - player[0], dy = attach_point[1] - player[1];
+            float len = std::sqrt(dx * dx + dy * dy);
+            const unsigned char* pos = EngineObjectPosition(EnginePlayerObject());
+            if (pos && len > 0.05f) {
+                float h = *reinterpret_cast<const int16_t*>(pos + 0x14) * (kPi / 32768.0f);  // body heading
+                dx /= len, dy /= len;
+                attach_forward = dx * std::cos(h) + dy * std::sin(h);
+                attach_right = dx * std::sin(h) - dy * std::cos(h);
+            }
+        }
+    }
+    // On it: the pulling hand's height change moves the player the other way
+    // (the engine's climb speed, steered to where the pulls put the player).
+    float hand_climb = 0;  // -1..1, + up
+    if (climbing && climb_hand >= 0 && have_player) {
+        float y = c.grip_pose[climb_hand].position.y;
+        climb_target_z -= (y - climb_hand_y) * s.world_scale;
+        climb_hand_y = y;
+        // Blocked (the top, the floor): don't build up a pull it can't follow.
+        climb_target_z = std::fmax(player[2] - 1.0f, std::fmin(player[2] + 1.0f, climb_target_z));
+        float error = climb_target_z - player[2];
+        if (std::fabs(error) > 0.05f)
+            hand_climb = std::fmax(-1.0f, std::fmin(1.0f, error / 0.4f));
+    }
+
     // --- Movement (left stick), relative to where you look ---
     XrVector2f stick = Deadzone(c.move, s.stick_deadzone);
-    if (g_run_toggle.Pressed(c.stick_click[0])) {
+    if (BindFired(kActRunToggle)) {
         g_run_on = !g_run_on;
         XrControls().Vibrate(0, 0.3f, 0.05f);
     }
@@ -118,18 +249,44 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     // Climbing (a ladder or rope): the engine climbs in the direction the body
     // looks (look up and go forward to climb up). That pitch follows the hand
     // here, so instead: stick forward climbs up, back climbs down (the look
-    // pitch is set to match below), wherever you look or point.
-    const bool climbing = EnginePlayerMode() == kPlayerModeClimb;
+    // pitch is set to match below, only while climbing, so the bow still aims
+    // when holding still), wherever you look or point. Or the hands' pulls.
+    const float kClimbPitch = 60.0f * kPi / 180.0f;
+    bool climb_move = false;
     float climb_pitch = 0;
     if (climbing) {
-        const float kClimbPitch = 60.0f * kPi / 180.0f;
-        climb_pitch = stick.y >= 0 ? -kClimbPitch : kClimbPitch;  // positive = down
-        forward = std::fabs(stick.y) * speed;
+        float up = stick.y != 0 ? stick.y * speed : hand_climb;
+        climb_move = up != 0 || stick.x != 0;
+        climb_pitch = up >= 0 ? -kClimbPitch : kClimbPitch;  // positive = down
+        forward = std::fabs(up);
         right = stick.x * speed;
+    } else if (attach_time >= 0 && stick.x == 0 && stick.y == 0) {
+        climb_move = true;  // onto the grabbed ladder, facing it (looking level)
+        climb_pitch = 0;
+        forward = attach_forward * 0.8f;
+        right = attach_right * 0.8f;
+    }
+    // While climbing or getting on, the body faces the ladder / rope: the engine
+    // climbs along the body's facing, which otherwise follows the hand (and
+    // would drift sideways when the hand points off to the side).
+    bool face_climb = false;
+    float face_heading = 0;
+    if (climb_move && have_player) {
+        float point[3];
+        if (!climbing) {
+            face_climb = attach_time >= 0;
+            face_heading = attach_face;
+        } else if (EngineClimbTarget(player, point)) {
+            float dx = point[0] - player[0], dy = point[1] - player[1];
+            if (dx * dx + dy * dy > 0.2f * 0.2f) {
+                face_climb = true;
+                face_heading = std::atan2(dy, dx);
+            }
+        }
     }
     if (s.invert_strafe)
         right = -right;
-    if (stick.x != 0 || stick.y != 0) {
+    if (stick.x != 0 || stick.y != 0 || climb_move) {
         EngineSetMovement(forward, right);
         g_moving = true;
     } else if (g_moving) {
@@ -182,19 +339,21 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         } else {
             EngineSetAimYaw(0);  // body faces the tracking forward
         }
-        if (climbing)
+        if (climb_move)
             EngineSetLookPitch(climb_pitch);
+        float world_yaw;
+        if (face_climb && EngineWorldYaw(world_yaw))
+            EngineSetAimYaw(std::atan2(std::sin(face_heading - world_yaw), std::cos(face_heading - world_yaw)));
     }
 
-    // --- Right stick up / down: jump, toggle crouch ---
-    g_jump.Set(c.turn.y > 0.7f);
-    if (g_crouch_toggle.Pressed(c.turn.y < -0.7f)) {
+    // --- Jump, toggle crouch (by default the right stick up / down) ---
+    g_jump.Set(BindHeld(kActJump));
+    // (Crouch toggles on each call, like its key binding, which has no release.)
+    if (BindFired(kActCrouchToggle))
         EngineInput("crouch", true);
-        EngineInput("crouch", false);
-    }
 
     // --- Triggers and grips ---
-    static bool rt, rg, lt, lg;
+    static bool rt, rg;
 
     // --- Swing to attack: a fast swing taps "use weapon" (Thief's quick
     //     attack). Holding the trigger instead still winds up a charged attack.
@@ -314,7 +473,7 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     //     release drops it). Potions and the like are used on the release.
     //     Without "Throw by swinging" the use is at once, and a throw leaves
     //     the hand where it points.
-    const bool grip_use = grip && !grip_draws;
+    const bool grip_use = grip && !grip_draws && !grip_taken[1];
     // What the squeeze does, decided as it starts:
     //   use:    "use item" held while squeezed (doors, levers; an inventory
     //           item selected, e.g. lockpicks on a lock);
@@ -323,13 +482,32 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     //           while the grip is still squeezed;
     //   throw:  nothing highlighted, or holding a picked-up object - let go to
     //           throw / drop it.
-    enum GripMode { kGripNone, kGripUse, kGripTapped, kGripThrow };
+    //   gesture: a door, lever or button - it's frobbed when the hand moves
+    //           with it (pull or push); held still with an item selected (a
+    //           key, lockpicks), "use item" is held as above.
+    enum GripMode { kGripNone, kGripUse, kGripTapped, kGripThrow, kGripGesture, kGripDone };
     static GripMode mode = kGripNone;
     static bool grip_use_was;
     static int use_tap;  // a tap of "use item": 2 = press this frame, 1 = release
+    static XrVector3f gesture_start;  // the hand where the grip closed (tracking space)
+    static Vec3 gesture_normal;       // a door's face direction (world); zero for levers / buttons
+    static double gesture_time;
+    float hand_now[3];
+    const bool hand_known = StereoHandWorld(1, hand_now);
     if (grip_use && !grip_use_was) {
-        bool highlighted = EngineFrobTarget() != 0, holding = EngineHeldJunk() != 0;
-        if (s.swing_to_throw && (!highlighted || holding)) {
+        int target = EngineFrobTarget();
+        bool highlighted = target != 0, holding = EngineHeldJunk() != 0;
+        int kind = s.hand_gestures && highlighted && !holding && hand_known ? EngineGestureKind(target) : kGestureNone;
+        Vec3 normal{};
+        if (kind == kGestureDoor && !AtDoorHandle(target, hand_now, normal)) {
+            // Away from the handle: only a key / lockpicks (held on it), else nothing.
+            mode = EngineSelectedItem() != 0 ? kGripUse : kGripDone;
+        } else if (kind != kGestureNone) {
+            mode = kGripGesture;
+            gesture_time = 0;
+            gesture_start = c.grip_pose[1].position;
+            gesture_normal = kind == kGestureDoor ? normal : Vec3{};
+        } else if (s.swing_to_throw && (!highlighted || holding)) {
             mode = kGripThrow;
         } else if (s.swing_to_throw && EngineSelectedItem() == 0) {
             mode = kGripTapped;
@@ -339,6 +517,23 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
             float offset[3], aim[3];
             if (!highlighted && StereoRightHand(offset, aim))
                 EngineSetThrow(offset, aim, 1.0f);  // a throw on the press leaves the hand
+        }
+    }
+    if (mode == kGripGesture && grip_use) {
+        gesture_time += dt;
+        // The hand's own movement (metres, not the player's): for a door, across it.
+        const XrVector3f& now = c.grip_pose[1].position;
+        XrVector3f delta{now.x - gesture_start.x, now.y - gesture_start.y, now.z - gesture_start.z};
+        float moved = Length(Vec3{delta.x, delta.y, delta.z}), across = moved;
+        float w[3];
+        if (Length(gesture_normal) > 0 && StereoTrackedDirToWorld(delta, w))
+            across = std::fabs(w[0] * gesture_normal.x + w[1] * gesture_normal.y + w[2] * gesture_normal.z);
+        if (across > 0.08f) {  // ~8 cm: pulled or pushed
+            use_tap = 2;
+            mode = kGripDone;
+            XrControls().Vibrate(1, 0.6f, 0.05f);
+        } else if (gesture_time > 0.4 && moved < 0.04f && EngineSelectedItem() != 0) {
+            mode = kGripUse;  // a key or lockpicks on it
         }
     }
     // The tap picked something up: it's held while squeezed, let go to throw / drop it.
@@ -361,11 +556,32 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
         }
         mode = kGripNone;
     }
+    // A push with the open hand: it moves into a button quickly.
+    static float push_was = -1;  // the hand's distance from the target's box last frame (ft)
+    static int push_target;
+    static double push_cooldown;
+    push_cooldown -= dt;
+    {
+        int target = EngineFrobTarget();
+        float d = -1;
+        if (s.hand_gestures && !grip && hand_known && target && EngineGestureKind(target) == kGestureButton)
+            d = EngineObjectBoxDistance(target, hand_now);
+        float speed = c.velocity_valid[1] ? Length(Vec3{c.linear_velocity[1].x, c.linear_velocity[1].y,
+                                                        c.linear_velocity[1].z})
+                                          : 0.0f;
+        if (d >= 0 && d < 0.15f && push_was >= 0.15f && target == push_target && speed > 0.6f &&
+            push_cooldown <= 0 && use_tap == 0) {
+            use_tap = 2;
+            push_cooldown = 0.8;
+            XrControls().Vibrate(1, 0.6f, 0.05f);
+        }
+        push_was = d, push_target = target;
+    }
     if (use_tap > 0)
         want_use = use_tap-- == 2;
     grip_use_was = grip_use;
     g_use_item.Set(want_use);
-    g_block.Set(Analog(lt, c.trigger[0]));
+    g_block.Set(BindHeld(kActBlock));
 
     // --- Crouch: left grip, or physically crouching ---
     static bool body_crouched;
@@ -374,7 +590,9 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
                                       : head.offset_up_ft < -s.physical_crouch_ft;
     else
         body_crouched = false;
-    g_crouch_hold.Set(Analog(lg, c.grip[0]) || body_crouched);
+    // (Not while the left grip holds a ladder, if that's the crouch button.)
+    const bool crouch_grip_climbing = BindButtonOf(kActCrouchHold) == kButtonLeftGrip && grip_taken[0];
+    g_crouch_hold.Set((BindHeld(kActCrouchHold) && !crouch_grip_climbing) || body_crouched);
 
     // --- Lean: physically leaning sideways (relative to the body) ---
     static int body_lean;  // -1 left, 0 none, 1 right
@@ -391,29 +609,20 @@ void ControlsUpdate(const XrControllerState& c, bool in_mission, double dt)
     g_lean_left.Set(body_lean < 0);
     g_lean_right.Set(body_lean > 0);
 
-    // --- Buttons ---
-    if (g_a.Pressed(c.a))
+    // --- Buttons (bindings.h; by default A / B / X / Y, Y held, right stick click) ---
+    if (BindFired(kActNextWeapon))
         EngineCommand("next_weapon");
-    if (g_b.Pressed(c.b))
+    if (BindFired(kActPutAway))
         EngineCommand("clear_weapon");
-    if (g_x.Pressed(c.x))
+    if (BindFired(kActNextItem))
         EngineCommand("next_item");
-    // Y: tap = previous item (on release), hold = objectives.
-    static double y_held = -1;  // seconds held; -1 up, -2 hold already fired
-    if (c.y) {
-        if (y_held == -1)
-            y_held = 0;
-        else if (y_held >= 0 && (y_held += dt) >= 0.5) {
-            EngineCommand("objectives");
-            XrControls().Vibrate(0, 0.3f, 0.05f);
-            y_held = -2;
-        }
-    } else {
-        if (y_held >= 0)
-            EngineCommand("prev_item");
-        y_held = -1;
+    if (BindFired(kActPrevItem))
+        EngineCommand("prev_item");
+    if (BindFired(kActObjectives)) {
+        EngineCommand("objectives");
+        XrControls().Vibrate(0, 0.3f, 0.05f);
     }
-    if (g_map.Pressed(c.stick_click[1]))
+    if (BindFired(kActMap))
         EngineCommand("automap");
 }
 

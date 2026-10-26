@@ -5,6 +5,7 @@
 #include "input/screen_pointer.h"
 #include "input/vr_controls.h"
 #include "log.h"
+#include "input/bindings.h"
 #include "ui/vr_menu.h"
 #include "ui/wrist_hud.h"
 
@@ -451,30 +452,25 @@ bool VrOnPresent(IDirect3DDevice9* device)
     XrControllerState controllers;
     XrControls().Update(g_frame.display_time, controllers);
 
-    // Left menu button: tap = the game's menu (Esc), hold = VR settings menu. F10 also toggles it.
-    static double menu_held_ms = -1;
+    // The button bindings (input/bindings.h), worked out once for the frame.
+    BindingsUpdate(controllers, dt);
+
+    // The menus (by default the left menu button): tap = the game's menu (Esc),
+    // hold = VR settings menu. F10 also toggles it.
     static bool f10_was_down;
     bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     if (f10_down && !f10_was_down)
         MenuToggle(g_frame);
     f10_was_down = f10_down;
-    if (controllers.menu) {
-        if (menu_held_ms == -1)
-            menu_held_ms = 0;
-        else if (menu_held_ms >= 0 && (menu_held_ms += dt * 1000.0) >= kMenuHoldSeconds * 1000.0) {
-            MenuToggle(g_frame);
-            menu_held_ms = -2;  // fired; wait for release
-        }
-    } else {
-        if (menu_held_ms >= 0 && !MenuIsOpen()) {
-            // In a mission: the game's menu command. On a 2D screen (commands may
-            // not run there): Esc, which backs out of menus.
-            if (in_scene)
-                EngineCommand("sim_menu");
-            else
-                ScreenPointerSendEsc(GameWindow(device));
-        }
-        menu_held_ms = -1;
+    if (BindFired(kActVrMenu))
+        MenuToggle(g_frame);
+    if (BindFired(kActGameMenu) && !MenuIsOpen()) {
+        // In a mission: the game's menu command. On a 2D screen (commands may
+        // not run there): Esc, which backs out of menus.
+        if (in_scene)
+            EngineCommand("sim_menu");
+        else
+            ScreenPointerSendEsc(GameWindow(device));
     }
 
     XrControllerState game_controls = controllers;
@@ -570,9 +566,9 @@ bool VrOnPresent(IDirect3DDevice9* device)
         if (player && player != last_player) {
             last_player = player;
             if (s.show_menu_hint) {
-                char text[128];
-                snprintf(text, sizeof(text), "Hold the left menu button for %.1f seconds to open the VR menu",
-                         kMenuHoldSeconds);
+                char text[160];
+                snprintf(text, sizeof(text), "Hold %s for %.1f seconds to open the VR menu",
+                         BindButtonName(BindButtonOf(kActVrMenu)), kMenuHoldSeconds);
                 MenuShowToast(text, 6.0);
             }
         }

@@ -355,6 +355,22 @@ bool DecodeImage(const void* data, size_t size, Texture& out)
     return DecodeImage(file, out);
 }
 
+bool LoadBounds(const char* name, Vec3& bbox_min, Vec3& bbox_max)
+{
+    std::string crf = GameDir() + "RES\\obj.crf";
+    std::vector<unsigned char> d;
+    if (!ReadZipEntry(crf, name, d) || d.size() < 48 || memcmp(d.data(), "LGMD", 4) != 0)
+        return false;
+    auto f32 = [&](size_t o) {
+        float v;
+        memcpy(&v, &d[o], 4);
+        return v;
+    };
+    bbox_max = {f32(24), f32(28), f32(32)};
+    bbox_min = {f32(36), f32(40), f32(44)};
+    return true;
+}
+
 bool Load(const char* name, Model& out)
 {
     std::string crf = GameDir() + "RES\\obj.crf";

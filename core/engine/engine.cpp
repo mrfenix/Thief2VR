@@ -2,6 +2,7 @@
 
 #include "../log.h"
 #include "../render/device_hooks.h"
+#include "../render/game_models.h"
 #include "../vrmath.h"
 #include "build_id.h"
 
@@ -14,6 +15,8 @@
 #include <dsound.h>
 #include <intrin.h>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 
 static void* g_camera_update_trampoline;
 static void __cdecl CameraUpdateDetour();
@@ -84,7 +87,10 @@ const InputVar kInputVars[] = {
     {"block", 0x493350},      {"lookcenter", 0x49f6bc},
 };
 constexpr int kInputVarCount = sizeof(kInputVars) / sizeof(kInputVars[0]);
-typedef int(__cdecl* InputHandler)(char* name, char* value);
+// cdecl(name, value, fresh): fresh is nonzero for a new key press (not a key
+// repeat); the toggle crouch handler (FUN_00432650) needs it with
+// crouch_norepeat on. Handlers that don't take it ignore it.
+typedef int(__cdecl* InputHandler)(char* name, char* value, int fresh);
 InputHandler g_input_handler[kInputVarCount];
 
 const BuildTable* g_build;
@@ -308,7 +314,7 @@ bool EngineInput(const char* name, bool pressed)
             char name_buf[32], value[4];
             strcpy_s(name_buf, name);
             strcpy_s(value, pressed ? "1" : "0");
-            g_input_handler[i](name_buf, value);
+            g_input_handler[i](name_buf, value, pressed ? 1 : 0);
             return true;
         }
     }
@@ -1346,11 +1352,251 @@ __declspec(naked) static int __cdecl PickExcluded(int /*obj*/)
 }
 
 // The hand's score for an object (lower is better), or -1 if it doesn't qualify.
+// --- Physical interaction ---------------------------------------------------
+
+bool EnginePlayerPosition(float out[3])
+{
+    const float* p = g_player_object && *g_player_object
+                         ? reinterpret_cast<const float*>(EngineObjectPosition(*g_player_object))
+                         : nullptr;
+    if (!p)
+        return false;
+    out[0] = p[0], out[1] = p[1], out[2] = p[2];
+    return true;
+}
+
+namespace {
+
+struct Bounds {
+    bool valid;
+    Vec3 bmin, bmax;
+};
+
+// Model bounding boxes by model name, read once.
+const Bounds& ModelBounds(const char* name)
+{
+    static std::unordered_map<std::string, Bounds> cache;
+    std::string key = name;
+    for (char& ch : key)
+        ch = (char)tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+    Bounds b{};
+    b.valid = game_models::LoadBounds((key + ".bin").c_str(), b.bmin, b.bmax);
+    return cache.emplace(key, b).first->second;
+}
+
+Mat3 AnglesToMatrix(const unsigned char* pos)
+{
+    // Position + 0x10: 16-bit bank, pitch, heading; composed heading * pitch * bank.
+    auto angle = [&](int o) { return FromAngle16(*reinterpret_cast<const int16_t*>(pos + o)); };
+    return RotZ(angle(0x14)) * RotY(angle(0x12)) * RotX(angle(0x10));
+}
+
+}  // namespace
+
+bool EngineObjectBox(int obj, float pos[3], float rot[9], float bmin[3], float bmax[3])
+{
+    char name[32];
+    unsigned char* p = EngineObjectPosition(obj);
+    if (!p || !EngineObjectModelName(obj, name, sizeof(name)))
+        return false;
+    const Bounds& b = ModelBounds(name);
+    if (!b.valid)
+        return false;
+    const float* v = reinterpret_cast<const float*>(p);
+    pos[0] = v[0], pos[1] = v[1], pos[2] = v[2];
+    Mat3 r = AnglesToMatrix(p);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            rot[i * 3 + j] = r.m[i][j];
+    bmin[0] = b.bmin.x, bmin[1] = b.bmin.y, bmin[2] = b.bmin.z;
+    bmax[0] = b.bmax.x, bmax[1] = b.bmax.y, bmax[2] = b.bmax.z;
+    return true;
+}
+
+static float BoxDistance(const float pos[3], const float rot[9], const float bmin[3], const float bmax[3],
+                         const float p[3], float closest[3] = nullptr)
+{
+    // Into the box's frame (rot's columns are its axes), clamp, and back.
+    float d[3] = {p[0] - pos[0], p[1] - pos[1], p[2] - pos[2]};
+    float local[3], clamped[3], sum = 0;
+    for (int j = 0; j < 3; ++j) {
+        local[j] = d[0] * rot[0 * 3 + j] + d[1] * rot[1 * 3 + j] + d[2] * rot[2 * 3 + j];
+        clamped[j] = std::fmax(bmin[j], std::fmin(bmax[j], local[j]));
+        sum += (local[j] - clamped[j]) * (local[j] - clamped[j]);
+    }
+    if (closest)
+        for (int i = 0; i < 3; ++i)
+            closest[i] = pos[i] + rot[i * 3 + 0] * clamped[0] + rot[i * 3 + 1] * clamped[1] + rot[i * 3 + 2] * clamped[2];
+    return std::sqrt(sum);
+}
+
+float EngineObjectBoxDistance(int obj, const float p[3])
+{
+    float pos[3], rot[9], bmin[3], bmax[3];
+    if (!EngineObjectBox(obj, pos, rot, bmin, bmax))
+        return -1;
+    return BoxDistance(pos, rot, bmin, bmax, p);
+}
+
+static bool IsDoor(int obj)
+{
+    // The RotDoor (DAT_0099b6f8) and TransDoor (DAT_0099b6f0) properties;
+    // IProperty vtbl 0x24 IsRelevant(obj): the object or an archetype has it.
+    __try {
+        const uintptr_t props[] = {0x59b6f8, 0x59b6f0};
+        for (uintptr_t at : props) {
+            void** prop = *reinterpret_cast<void***>(g_base + at);
+            if (!prop)
+                continue;
+            auto relevant = reinterpret_cast<int(__stdcall*)(void*, int)>((*reinterpret_cast<void***>(prop))[0x24 / 4]);
+            if (relevant(prop, obj))
+                return true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return false;
+}
+
+int EngineGestureKind(int obj)
+{
+    if (!g_base || obj <= 0)
+        return kGestureNone;
+    if (IsDoor(obj))
+        return kGestureDoor;
+    // Levers and buttons, by model (IRONLEV, LEVER01, levmol, VSWITCH1;
+    // BUTTON, buttgrn, ELEVBUT, knobmol), not lifts (elevator, elevpan).
+    char name[32];
+    if (!EngineObjectModelName(obj, name, sizeof(name)))
+        return kGestureNone;
+    for (char* ch = name; *ch; ++ch)
+        *ch = (char)tolower((unsigned char)*ch);
+    if (strstr(name, "but") || strstr(name, "knob"))
+        return kGestureButton;
+    if (strstr(name, "switch"))
+        return kGestureLever;
+    for (const char* lev = strstr(name, "lev"); lev; lev = strstr(lev + 1, "lev"))
+        if (lev == name || lev[-1] != 'e')
+            return kGestureLever;
+    return kGestureNone;
+}
+
+// One physics model, for EngineFindClimbable: its distance if climbable (and
+// closer than best_d), else best_d. Kept apart for the __try.
+static float ClimbableDistance(int obj, const float p[3], float best_d, float closest[3])
+{
+    __try {
+        unsigned char* model = g_get_phys_model(obj);
+        if (!model)
+            return best_d;
+        unsigned flags = *reinterpret_cast<unsigned*>(model + 0x20);
+        if (flags & 0x4000) {
+            int count = *reinterpret_cast<int*>(model + 0x10);
+            const unsigned char* locs = *reinterpret_cast<unsigned char**>(model + 0xf0);
+            if (!locs || count <= 0 || count > 256)
+                return best_d;
+            for (int i = 0; i < count; ++i) {
+                const float* a = reinterpret_cast<const float*>(locs + i * 0x48);
+                const float* b = i + 1 < count ? reinterpret_cast<const float*>(locs + (i + 1) * 0x48) : a;
+                // The closest point on the segment a-b.
+                float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                float len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+                float t = len2 > 1e-6f
+                              ? ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / len2
+                              : 0;
+                t = std::fmax(0.0f, std::fmin(1.0f, t));
+                float q[3] = {a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t};
+                float d = std::sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) +
+                                    (p[2] - q[2]) * (p[2] - q[2]));
+                if (d < best_d) {
+                    best_d = d;
+                    closest[0] = q[0], closest[1] = q[1], closest[2] = q[2];
+                }
+            }
+            return best_d;
+        }
+        auto type = reinterpret_cast<int(__thiscall*)(void*, int)>((*reinterpret_cast<void***>(model))[2]);
+        if (type(model, 0) != 3 || *reinterpret_cast<unsigned*>(model + 0x20c) == 0)
+            return best_d;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return best_d;
+    }
+    float pos[3], rot[9], bmin[3], bmax[3], q[3];
+    if (!EngineObjectBox(obj, pos, rot, bmin, bmax))
+        return best_d;
+    float d = BoxDistance(pos, rot, bmin, bmax, p, q);
+    if (d < best_d) {
+        best_d = d;
+        closest[0] = q[0], closest[1] = q[1], closest[2] = q[2];
+    }
+    return best_d;
+}
+
+int EngineFindClimbable(const float p[3], float radius, float closest[3])
+{
+    // Physics models (FUN_00507d70) that the climbing code (FUN_00508d50) grabs:
+    //   a rope: flags (+0x20) & 0x4000; its segments are the sub-models,
+    //     count +0x10, locations *(+0xf0) every 0x48 bytes (vector first);
+    //   a ladder: an OBB model (vtbl 8 __thiscall(model, 0) == 3) with climbable
+    //     sides (bit mask +0x20c); its box from the object's model.
+    if (!g_get_phys_model)
+        return 0;
+    int best = 0;
+    float best_d = radius;
+    const int kMaxObject = 8192;
+    for (int obj = 1; obj < kMaxObject; ++obj) {
+        float d = ClimbableDistance(obj, p, best_d, closest);
+        if (d < best_d)
+            best_d = d, best = obj;
+    }
+    return best;
+}
+
+// Where the hand's ray (g_hand_origin, g_hand_dir) enters an object's box, in
+// feet along it (0 if it starts inside), or -1 if it misses.
+static float HandRayBoxHit(const float pos[3], const float rot[9], const float bmin[3], const float bmax[3])
+{
+    float t0 = 0, t1 = 1e9f;
+    for (int j = 0; j < 3; ++j) {
+        float o = 0, d = 0;
+        for (int i = 0; i < 3; ++i) {
+            o += (g_hand_origin[i] - pos[i]) * rot[i * 3 + j];
+            d += g_hand_dir[i] * rot[i * 3 + j];
+        }
+        if (std::fabs(d) < 1e-6f) {
+            if (o < bmin[j] || o > bmax[j])
+                return -1;
+            continue;
+        }
+        float a = (bmin[j] - o) / d, b = (bmax[j] - o) / d;
+        if (a > b)
+            std::swap(a, b);
+        t0 = std::fmax(t0, a), t1 = std::fmin(t1, b);
+        if (t0 > t1)
+            return -1;
+    }
+    return t0;
+}
+
 static float HandPickScore(int obj)
 {
     const float* p = reinterpret_cast<const float*>(EngineObjectPosition(obj));
     if (!p)
         return -1;
+    // Doors, levers and buttons: touching any part of them (their middle can be
+    // far from the hand, e.g. at a door's handle), or pointing at any part.
+    if (EngineGestureKind(obj) != kGestureNone) {
+        float pos[3], rot[9], bmin[3], bmax[3];
+        if (EngineObjectBox(obj, pos, rot, bmin, bmax)) {
+            float touch = BoxDistance(pos, rot, bmin, bmax, g_hand_origin);
+            if (touch < 0.35f)
+                return touch * 0.1f;
+            float t = HandRayBoxHit(pos, rot, bmin, bmax);
+            return t >= 0 && t <= g_hand_reach ? 0.1f + 0.02f * t : -1;
+        }
+    }
     float v[3] = {p[0] - g_hand_origin[0], p[1] - g_hand_origin[1], p[2] - g_hand_origin[2]};
     float dist = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     const float kTouch = 1.0f;  // ft: the hand is on it
@@ -1614,6 +1860,83 @@ bool EngineObjectModelName(int obj, char* out, int size)
             return false;
         strncpy_s(out, size, name, _TRUNCATE);
         return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool EngineClimbTarget(const float p[3], float closest[3])
+{
+    // The climbing object, as FUN_00508d50 sets it: DAT_00aa144c + 0x14.
+    if (!g_base || !g_get_phys_model || EnginePlayerMode() != kPlayerModeClimb)
+        return false;
+    int obj = 0;
+    __try {
+        unsigned char* state = *reinterpret_cast<unsigned char**>(g_base + 0x6a144c);
+        obj = state ? *reinterpret_cast<int*>(state + 0x14) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return obj > 0 && ClimbableDistance(obj, p, 1e9f, closest) < 1e9f;
+}
+
+bool EngineTryClimb()
+{
+    // FUN_00508d50 (cdecl, obj): through the object's physics contacts, grabs a
+    // ladder side / rope it touches while facing it (as on a collision).
+    if (!g_base || !g_player_object || !*g_player_object)
+        return false;
+    auto try_climb = reinterpret_cast<int(__cdecl*)(int)>(g_base + 0x108d50);
+    __try {
+        return try_climb(*g_player_object) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool EngineDoorHinge(int obj, float hinge[3])
+{
+    // The RotDoor property (DAT_0099b6f8), vtbl 0x54 Get(obj, sRotDoorProp**):
+    //   +0x04 closed angle, +0x08 open angle (degrees), +0x10 axis (2 = z),
+    //   +0x28 the position closed, +0x34 the position open.
+    // The door turns about its hinge between the two, so the hinge h solves
+    // open - h = Rz(a) (closed - h), for a = +-(open - closed); the one that
+    // lies on the door's plane (not across its thickness) is it.
+    if (!g_base)
+        return false;
+    const float* d = nullptr;
+    __try {
+        void** prop = *reinterpret_cast<void***>(g_base + 0x59b6f8);
+        if (!prop)
+            return false;
+        auto get = reinterpret_cast<int(__stdcall*)(void*, int, void**)>((*reinterpret_cast<void***>(prop))[0x54 / 4]);
+        void* value = nullptr;
+        if (!get(prop, obj, &value) || !value)
+            return false;
+        d = static_cast<const float*>(value);
+        if (reinterpret_cast<const int*>(d)[4] != 2)
+            return false;
+        float angle = (d[2] - d[1]) * (3.14159265f / 180.0f);
+        float dx = d[13] - d[10], dy = d[14] - d[11];
+        if (std::fabs(std::sin(angle)) < 0.05f || dx * dx + dy * dy < 0.01f)
+            return false;
+        float pos[3], rot[9], bmin[3], bmax[3];
+        if (!EngineObjectBox(obj, pos, rot, bmin, bmax))
+            return false;
+        const int thin = bmax[0] - bmin[0] >= bmax[1] - bmin[1] ? 1 : 0;
+        float best = 1e9f;
+        for (float sign : {1.0f, -1.0f}) {
+            // (Rz(a) - I) v = open - closed, v = closed - h.
+            float c = std::cos(sign * angle) - 1, s = std::sin(sign * angle);
+            float det = c * c + s * s;
+            float vx = (c * dx + s * dy) / det, vy = (-s * dx + c * dy) / det;
+            float h[3] = {d[10] - vx, d[11] - vy, pos[2]};
+            // How far across the door's thickness it is, where the door stands now.
+            float across = std::fabs((h[0] - pos[0]) * rot[0 * 3 + thin] + (h[1] - pos[1]) * rot[1 * 3 + thin]);
+            if (across < best)
+                best = across, hinge[0] = h[0], hinge[1] = h[1], hinge[2] = h[2];
+        }
+        return best < 1.0f;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }

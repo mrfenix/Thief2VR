@@ -83,11 +83,41 @@ bool XrInput::Init()
         {haptic_, Path("/user/hand/left/output/haptic")},
         {haptic_, Path("/user/hand/right/output/haptic")},
     };
+    touch_path_ = Path("/interaction_profiles/oculus/touch_controller");
     XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    suggested.interactionProfile = Path("/interaction_profiles/oculus/touch_controller");
+    suggested.interactionProfile = touch_path_;
     suggested.suggestedBindings = b.data();
     suggested.countSuggestedBindings = (uint32_t)b.size();
-    XrCheck(xrSuggestInteractionProfileBindings(Xr().instance(), &suggested), "suggest Touch bindings");
+    bool touch_ok = XrCheck(xrSuggestInteractionProfileBindings(Xr().instance(), &suggested), "suggest Touch bindings");
+
+    // Valve Index: no X / Y / menu buttons. The left A / B stand in for X / Y,
+    // and a left trackpad press (its force, thresholded by the runtime) for menu.
+    std::vector<XrActionSuggestedBinding> index = {
+        {move_, Path("/user/hand/left/input/thumbstick")},
+        {turn_, Path("/user/hand/right/input/thumbstick")},
+        {trigger_, Path("/user/hand/left/input/trigger/value")},
+        {trigger_, Path("/user/hand/right/input/trigger/value")},
+        {grip_, Path("/user/hand/left/input/squeeze/value")},
+        {grip_, Path("/user/hand/right/input/squeeze/value")},
+        {a_, Path("/user/hand/right/input/a/click")},
+        {b_, Path("/user/hand/right/input/b/click")},
+        {x_, Path("/user/hand/left/input/a/click")},
+        {y_, Path("/user/hand/left/input/b/click")},
+        {stick_click_, Path("/user/hand/left/input/thumbstick/click")},
+        {stick_click_, Path("/user/hand/right/input/thumbstick/click")},
+        {menu_, Path("/user/hand/left/input/trackpad/force")},
+        {grip_pose_, Path("/user/hand/left/input/grip/pose")},
+        {grip_pose_, Path("/user/hand/right/input/grip/pose")},
+        {aim_pose_, Path("/user/hand/left/input/aim/pose")},
+        {aim_pose_, Path("/user/hand/right/input/aim/pose")},
+        {haptic_, Path("/user/hand/left/output/haptic")},
+        {haptic_, Path("/user/hand/right/output/haptic")},
+    };
+    index_path_ = Path("/interaction_profiles/valve/index_controller");
+    suggested.interactionProfile = index_path_;
+    suggested.suggestedBindings = index.data();
+    suggested.countSuggestedBindings = (uint32_t)index.size();
+    bool index_ok = XrCheck(xrSuggestInteractionProfileBindings(Xr().instance(), &suggested), "suggest Index bindings");
 
     for (int hand = 0; hand < 2; ++hand) {
         XrActionSpaceCreateInfo asi{XR_TYPE_ACTION_SPACE_CREATE_INFO};
@@ -104,7 +134,8 @@ bool XrInput::Init()
     attach.actionSets = &set_;
     if (!XrCheck(xrAttachSessionActionSets(Xr().session(), &attach), "xrAttachSessionActionSets"))
         return false;
-    Log("OpenXR input: Touch controller actions ready");
+    Log("OpenXR input: actions ready (bindings for%s%s)", touch_ok ? " Oculus Touch" : "",
+        index_ok ? " Valve Index" : "");
     return true;
 }
 
@@ -120,6 +151,23 @@ void XrInput::Update(XrTime display_time, XrControllerState& s)
     if (xrSyncActions(Xr().session(), &sync) != XR_SUCCESS)  // XR_SESSION_NOT_FOCUSED etc.
         return;
     s.active = true;
+
+    // Which controllers (about once a second; the runtime picks the profile).
+    if (display_time - profile_checked_ > 1000000000LL) {
+        profile_checked_ = display_time;
+        XrInteractionProfileState ps{XR_TYPE_INTERACTION_PROFILE_STATE};
+        XrControllerProfile now = XrControllerProfile::Unknown;
+        if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(Xr().session(), hand_path_[0], &ps)) &&
+            ps.interactionProfile != XR_NULL_PATH)
+            now = ps.interactionProfile == touch_path_   ? XrControllerProfile::Touch
+                  : ps.interactionProfile == index_path_ ? XrControllerProfile::Index
+                                                         : XrControllerProfile::Other;
+        if (now != XrControllerProfile::Unknown && now != profile_) {
+            profile_ = now;
+            const char* names[] = {"none yet", "Oculus Touch", "Valve Index", "other (no suggested bindings)"};
+            Log("OpenXR input: controllers: %s", names[(int)now]);
+        }
+    }
 
     auto vec2 = [&](XrAction a) {
         XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};

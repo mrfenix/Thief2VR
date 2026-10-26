@@ -4,6 +4,9 @@
 
 #include <dxgi.h>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -14,6 +17,108 @@ XrSystem& Xr()
     return system;
 }
 
+namespace {
+
+// Names for the errors that can come before there's an instance to ask
+// (xrResultToString needs one): those of finding and starting the runtime.
+const char* EarlyResultName(XrResult result)
+{
+    switch (result) {
+    case XR_ERROR_VALIDATION_FAILURE: return "XR_ERROR_VALIDATION_FAILURE";
+    case XR_ERROR_RUNTIME_FAILURE: return "XR_ERROR_RUNTIME_FAILURE";
+    case XR_ERROR_OUT_OF_MEMORY: return "XR_ERROR_OUT_OF_MEMORY";
+    case XR_ERROR_API_VERSION_UNSUPPORTED: return "XR_ERROR_API_VERSION_UNSUPPORTED";
+    case XR_ERROR_INITIALIZATION_FAILED: return "XR_ERROR_INITIALIZATION_FAILED";
+    case XR_ERROR_EXTENSION_NOT_PRESENT: return "XR_ERROR_EXTENSION_NOT_PRESENT";
+    case XR_ERROR_LIMIT_REACHED: return "XR_ERROR_LIMIT_REACHED";
+    case XR_ERROR_INSTANCE_LOST: return "XR_ERROR_INSTANCE_LOST";
+    case XR_ERROR_FILE_ACCESS_ERROR: return "XR_ERROR_FILE_ACCESS_ERROR";
+    case XR_ERROR_FILE_CONTENTS_INVALID: return "XR_ERROR_FILE_CONTENTS_INVALID";
+    case XR_ERROR_FORM_FACTOR_UNSUPPORTED: return "XR_ERROR_FORM_FACTOR_UNSUPPORTED";
+    case XR_ERROR_FORM_FACTOR_UNAVAILABLE: return "XR_ERROR_FORM_FACTOR_UNAVAILABLE";
+    case XR_ERROR_API_LAYER_NOT_PRESENT: return "XR_ERROR_API_LAYER_NOT_PRESENT";
+    case XR_ERROR_RUNTIME_UNAVAILABLE: return "XR_ERROR_RUNTIME_UNAVAILABLE";
+    default: return "?";
+    }
+}
+
+bool FileExists(const std::string& path)
+{
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// A string value from the runtime manifest (JSON), by key, unescaped. Enough
+// for the flat "name" / "library_path" fields; "" if not there.
+std::string ManifestString(const std::string& json, const char* key)
+{
+    size_t at = json.find(std::string("\"") + key + "\"");
+    if (at == std::string::npos)
+        return "";
+    at = json.find(':', at);
+    at = at == std::string::npos ? at : json.find('"', at);
+    if (at == std::string::npos)
+        return "";
+    std::string value;
+    for (size_t i = at + 1; i < json.size() && json[i] != '"'; ++i) {
+        if (json[i] == '\\' && i + 1 < json.size())
+            ++i;
+        value += json[i];
+    }
+    return value;
+}
+
+// Which OpenXR runtime the loader will use. This is a 32-bit process, so it's
+// the 32-bit setting (HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1, which 64-bit
+// apps don't use), unless XR_RUNTIME_JSON overrides it. Logged with whether its
+// manifest and library exist, so a failure to start can be told apart.
+void LogRuntime()
+{
+    std::string manifest, source;
+    char env[MAX_PATH * 2];
+    DWORD env_len = GetEnvironmentVariableA("XR_RUNTIME_JSON", env, sizeof(env));
+    if (env_len > 0 && env_len < sizeof(env)) {
+        manifest = env;
+        source = "XR_RUNTIME_JSON";
+    } else {
+        char value[MAX_PATH * 2];
+        DWORD size = sizeof(value);
+        if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Khronos\\OpenXR\\1", "ActiveRuntime",
+                         RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, nullptr, value, &size) == ERROR_SUCCESS) {
+            manifest = value;
+            source = "32-bit setting (WOW6432Node ActiveRuntime)";
+        }
+    }
+    if (manifest.empty()) {
+        Log("OpenXR: no 32-bit runtime is set (HKLM\\SOFTWARE\\WOW6432Node\\Khronos\\OpenXR\\1 ActiveRuntime)");
+        return;
+    }
+    bool exists = FileExists(manifest);
+    Log("OpenXR: runtime from the %s: %s%s", source.c_str(), manifest.c_str(), exists ? "" : " (MISSING)");
+    if (!exists)
+        return;
+    std::ifstream file(manifest, std::ios::binary);
+    std::stringstream text;
+    text << file.rdbuf();
+    std::string name = ManifestString(text.str(), "name"), library = ManifestString(text.str(), "library_path");
+    if (!library.empty() && library.find(':') == std::string::npos && library.rfind("\\\\", 0) != 0) {
+        size_t slash = manifest.find_last_of("\\/");
+        library = (slash == std::string::npos ? "" : manifest.substr(0, slash + 1)) + library;
+    }
+    Log("OpenXR: runtime \"%s\", library %s%s", name.empty() ? "?" : name.c_str(),
+        library.empty() ? "?" : library.c_str(), library.empty() || FileExists(library) ? "" : " (MISSING)");
+}
+
+// What to check when the runtime can't be started.
+void LogRuntimeHint()
+{
+    Log("OpenXR: Thief 2 is a 32-bit game, so it uses the 32-bit runtime setting, not the one 64-bit apps use. "
+        "Check that it points to your headset's 32-bit runtime (e.g. SteamVR: steamxr_win32.json; Virtual "
+        "Desktop: virtualdesktop-openxr-32.json), and that the runtime (e.g. SteamVR) is running before the game.");
+}
+
+}  // namespace
+
 bool XrCheck(XrResult result, const char* what)
 {
     if (XR_SUCCEEDED(result))
@@ -21,6 +126,8 @@ bool XrCheck(XrResult result, const char* what)
     char name[XR_MAX_RESULT_STRING_SIZE] = "?";
     if (Xr().instance() != XR_NULL_HANDLE)
         xrResultToString(Xr().instance(), result, name);
+    else
+        strcpy_s(name, EarlyResultName(result));
     Log("OpenXR: %s failed: %s (%d)", what, name, result);
     return false;
 }
@@ -97,10 +204,13 @@ bool XrSystem::Init()
         return false;
     }
 
+    LogRuntime();
     uint32_t ext_count = 0;
     if (!XrCheck(xrEnumerateInstanceExtensionProperties(nullptr, 0, &ext_count, nullptr),
-                 "xrEnumerateInstanceExtensionProperties"))
+                 "xrEnumerateInstanceExtensionProperties")) {
+        LogRuntimeHint();
         return false;
+    }
     std::vector<XrExtensionProperties> exts(ext_count, {XR_TYPE_EXTENSION_PROPERTIES});
     xrEnumerateInstanceExtensionProperties(nullptr, ext_count, &ext_count, exts.data());
     bool has_d3d11 = false;
@@ -108,6 +218,7 @@ bool XrSystem::Init()
         has_d3d11 |= strcmp(e.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0;
         has_refresh_rate_ |= strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0;
     }
+    Log("OpenXR: runtime offers %u extensions (D3D11: %s)", ext_count, has_d3d11 ? "yes" : "no");
     if (!has_d3d11) {
         Log("OpenXR: runtime has no %s", XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
         return false;
@@ -121,8 +232,10 @@ bool XrSystem::Init()
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     ici.enabledExtensionCount = has_refresh_rate_ ? 2 : 1;
     ici.enabledExtensionNames = enabled;
-    if (!XrCheck(xrCreateInstance(&ici, &instance_), "xrCreateInstance"))
+    if (!XrCheck(xrCreateInstance(&ici, &instance_), "xrCreateInstance")) {
+        LogRuntimeHint();
         return false;
+    }
 
     XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
     xrGetInstanceProperties(instance_, &props);

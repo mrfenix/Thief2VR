@@ -12,6 +12,7 @@
 #include "d3d9_hooks.h"
 #include "device_hooks.h"
 #include "hands.h"
+#include "world_gamma.h"
 
 #include <cstring>
 
@@ -613,7 +614,9 @@ void FillHand(int side, const XrPosef& grip_raw, const XrPosef& aim_raw, const X
 
 // The right hand (world) for physical frob and throwing, from the last frame.
 bool g_right_hand_valid;
-Vec3 g_right_hand_offset, g_right_hand_aim;  // grip point relative to the game camera; pointing
+Vec3 g_right_hand_offset, g_right_hand_aim;
+bool g_hand_world_valid[2];
+Vec3 g_hand_world[2];  // grip points (world)  // grip point relative to the game camera; pointing
 Mat3 g_tracked_to_world;                     // tracking -> world rotation
 
 // --- The bow ---
@@ -1076,6 +1079,11 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         // Physical frob and throwing: the right hand's grip point and pointing (world).
         g_tracked_to_world = world_yaw * unyaw * XrToEngineBasis();
         g_right_hand_valid = located[1];
+        for (int side = 0; side < 2; ++side) {
+            g_hand_world_valid[side] = located[side];
+            if (located[side])
+                g_hand_world[side] = tw_b + tw_a * ToVec(sm_grip[side].position);
+        }
         if (located[1]) {
             Vec3 grip_w = tw_b + tw_a * ToVec(sm_grip[1].position);
             g_right_hand_offset = grip_w - g_arm_pg;
@@ -1091,6 +1099,7 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         g_weapon_valid_until = GetTickCount64() + 250;
     } else {
         g_weapon_valid_until = 0;
+        g_hand_world_valid[0] = g_hand_world_valid[1] = false;
         EngineHideItemSlot(false);
     }
 
@@ -1187,6 +1196,9 @@ void __cdecl OnSceneRender(EnginePosition* pos, double focal)
         }
         if (g_eye_msaa)
             dev->StretchRect(target, nullptr, g_eyes.color[eye], nullptr, D3DTEXF_NONE);  // resolve
+        // Headset gamma / brightness (and the game's gamma option), on the world
+        // and hands only: the HUD and menus are other layers.
+        world_gamma::Apply(dev, g_eyes.color[eye], g_eyes.width, g_eyes.height);
     }
     EndGpuTiming(gpu_timing);
     *pos = body;
@@ -1247,6 +1259,7 @@ void StereoOnDeviceReset()
     g_eye_msaa = 0;
     ReleaseGpuQueries();
     hands::OnDeviceReset();
+    world_gamma::OnDeviceReset();
     g_eyes.width = g_eyes.height = 0;
 }
 
@@ -1296,6 +1309,14 @@ bool StereoRightHand(float offset[3], float aim[3])
         return false;
     offset[0] = g_right_hand_offset.x, offset[1] = g_right_hand_offset.y, offset[2] = g_right_hand_offset.z;
     aim[0] = g_right_hand_aim.x, aim[1] = g_right_hand_aim.y, aim[2] = g_right_hand_aim.z;
+    return true;
+}
+
+bool StereoHandWorld(int side, float pos[3])
+{
+    if (side < 0 || side > 1 || !g_hand_world_valid[side])
+        return false;
+    pos[0] = g_hand_world[side].x, pos[1] = g_hand_world[side].y, pos[2] = g_hand_world[side].z;
     return true;
 }
 

@@ -16,7 +16,8 @@ REQUIREMENTS
 - A PC VR setup with a 32-bit OpenXR runtime. Tested with a Meta Quest over
   Virtual Desktop, which provides one (VDXR). Thief 2 is a 32-bit game, so
   runtimes without 32-bit OpenXR support won't work.
-- Touch-style motion controllers.
+- Motion controllers: Meta Quest (Touch) or Valve Index; others may work
+  through your runtime's own bindings.
 
 
 INSTALL
@@ -75,6 +76,13 @@ CONTROLS
                            the bow (an arrow appears in your hand), pull
                            back, let go. One-handed: Hands tab.
 
+The buttons (jump, crouch, block, run, weapons, items, objectives, map and
+the menus) can be changed in the VR menu's Controls tab. A button can hold
+two actions as a tap and a hold, like previous item / objectives on Y.
+
+Valve Index controllers: the left A / B are X / Y above, and the menu button
+is a press on the left trackpad (tap: game menu, hold: VR menu).
+
 
 THE HUD ON YOUR BODY
 --------------------
@@ -100,8 +108,12 @@ PERFORMANCE
 TROUBLESHOOTING
 ---------------
 - The game runs flat on the monitor: the headset wasn't streaming when the
-  game started, or no 32-bit OpenXR runtime is set up. Check thief2vr.log in
-  the game folder.
+  game started, or no 32-bit OpenXR runtime is set up. Thief 2 is a 32-bit
+  game, so it uses Windows' 32-bit OpenXR runtime setting, not the one other
+  (64-bit) VR apps use. The installer checks it and offers to set it to a
+  32-bit runtime it finds (SteamVR, Virtual Desktop); run install.bat again
+  to get that offer. thief2vr.log in the game folder shows which runtime the
+  game tried and why it failed.
 - "VR stays off" / stereo disabled in the log: the game isn't the NewDark
   1.29 build from T2Fix (a different T2Fix version needs a mod update).
 - You feel too tall or too short, or can't fit under low places: check your
@@ -109,6 +121,9 @@ TROUBLESHOOTING
   "Vertical head tracking" (View tab) can be turned off to always use the
   game's eye height.
 - The weapon feels twitchy: raise "Weapon smoothing" (Hands tab).
+- Too dark in the headset: raise "Headset gamma" (and "Headset brightness")
+  in the VR menu's View tab. The game's own gamma option applies in the
+  headset too (unless "Also apply the game's own gamma option" is off).
 - Sounds turn with your hand instead of your head: the game is using
   software sound mixing. The installer sets "snd3d openal" (or "a3d") in
   cam_ext.cfg; check that it's there.

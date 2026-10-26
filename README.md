@@ -15,12 +15,12 @@ Play **Thief 2: The Metal Age** in VR, with full head and hand tracking.
 - **Physical crouch and lean:** crouch and lean for real, and the player does too.
 - **Every game screen in VR:** menus, map, objectives and books appear on a screen in front of you, driven by a laser pointer.
 - **Sound that follows your head**, and vibration when your weapon hits.
-- **An in-game VR menu** for comfort, controls, hands, HUD and weapon alignment settings.
+- **An in-game VR menu** for comfort, hands, HUD and weapon alignment settings, remappable buttons and headset brightness.
 
 ## What you need
 - **Thief 2** (Steam or GOG) with **[T2Fix](https://github.com/Xanfre/T2Fix/releases)** installed.
 - **A PC VR headset** with a 32-bit OpenXR runtime. It's tested on Meta Quest with **Virtual Desktop**, which provides one.
-- **Touch-style motion controllers.**
+- **Motion controllers:** Meta Quest (Touch) or Valve Index.
 
 ## Install
 1. Download the latest `Thief2VR-x.y.z.zip` from [Releases](../../releases).

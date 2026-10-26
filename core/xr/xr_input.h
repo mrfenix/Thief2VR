@@ -1,8 +1,8 @@
 #pragma once
 #include "xr_system.h"
 
-// Controller state for one frame (Touch controllers; other profiles map onto
-// the same actions where the runtime supports them).
+// Controller state for one frame. Oculus Touch layout; on Valve Index
+// controllers the left A / B are x / y and the left trackpad press is menu.
 struct XrControllerState {
     bool active = false;  // actions synced while the session has focus
 
@@ -12,7 +12,7 @@ struct XrControllerState {
     float grip[2] = {};
     bool a = false, b = false, x = false, y = false;
     bool stick_click[2] = {};
-    bool menu = false;  // left menu button
+    bool menu = false;  // left menu button (Index: left trackpad press)
 
     // Hand poses in LOCAL space (valid[] false when not tracked).
     XrPosef grip_pose[2]{};
@@ -23,6 +23,9 @@ struct XrControllerState {
     XrVector3f angular_velocity[2]{};
     bool velocity_valid[2] = {};
 };
+
+// The controllers the runtime is using (its interaction profile).
+enum class XrControllerProfile { Unknown, Touch, Index, Other };
 
 class XrInput {
 public:
@@ -35,6 +38,8 @@ public:
     void Vibrate(int hand, float amplitude, float seconds);
     // Grip and aim poses of a hand at a given time (LOCAL space). False if untracked.
     bool LocateHand(int hand, XrTime time, XrPosef& grip, XrPosef& aim);
+    // The controllers in use, as of the last check (about once a second).
+    XrControllerProfile Profile() const { return profile_; }
 
 private:
     XrActionSet set_ = XR_NULL_HANDLE;
@@ -44,6 +49,9 @@ private:
     XrAction stick_click_ = XR_NULL_HANDLE, menu_ = XR_NULL_HANDLE;
     XrAction grip_pose_ = XR_NULL_HANDLE, aim_pose_ = XR_NULL_HANDLE, haptic_ = XR_NULL_HANDLE;
     XrSpace grip_space_[2] = {}, aim_space_[2] = {};
+    XrPath touch_path_ = XR_NULL_PATH, index_path_ = XR_NULL_PATH;
+    XrControllerProfile profile_ = XrControllerProfile::Unknown;
+    XrTime profile_checked_ = 0;
 };
 
 XrInput& XrControls();

@@ -53,10 +53,12 @@
     <ClCompile Include="render\frame_transfer.cpp" />
     <ClCompile Include="render\hands.cpp" />
     <ClCompile Include="render\game_models.cpp" />
+    <ClCompile Include="render\world_gamma.cpp" />
     <ClCompile Include="vr.cpp" />
     <ClCompile Include="xr\xr_system.cpp" />
     <ClCompile Include="xr\xr_input.cpp" />
     <ClCompile Include="input\vr_controls.cpp" />
+    <ClCompile Include="input\bindings.cpp" />
     <ClCompile Include="input\screen_pointer.cpp" />
     <ClCompile Include="ui\vr_menu.cpp" />
     <ClCompile Include="ui\wrist_hud.cpp" />
@@ -75,6 +77,7 @@
   <ItemGroup>
     <ClInclude Include="log.h" />
     <ClInclude Include="config\settings.h" />
+    <ClInclude Include="input\bindings.h" />
     <ClInclude Include="engine\build_id.h" />
     <ClInclude Include="engine\engine.h" />
     <ClInclude Include="render\stereo.h" />
@@ -83,6 +86,7 @@
     <ClInclude Include="render\d3d9_hooks.h" />
     <ClInclude Include="render\device_hooks.h" />
     <ClInclude Include="render\frame_transfer.h" />
+    <ClInclude Include="render\world_gamma.h" />
     <ClInclude Include="render\hands.h" />
     <ClInclude Include="render\game_models.h" />
     <ClInclude Include="render\hand_model_data.h" />

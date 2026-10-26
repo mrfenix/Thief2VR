@@ -1,6 +1,7 @@
 #include "vr_menu.h"
 
 #include "../config/settings.h"
+#include "../input/bindings.h"
 #include "../log.h"
 #include "../render/stereo.h"
 #include "../vr.h"
@@ -13,6 +14,7 @@
 
 #include <cfloat>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
@@ -152,7 +154,38 @@ void RefreshRateWidget()
     }
 }
 
-// The controls reference (the Controls tab).
+// One button binding (Controls tab): a combo of the controller's buttons, by
+// their names on the controllers in use. The VR menu can't be unbound (F10
+// also opens it). Notes another action on the same button, unless the two
+// share it as a tap and a hold.
+void BindingWidget(BindAction action)
+{
+    int& button = BindSetting(action);
+    ImGui::PushID(action);
+    ImGui::SetNextItemWidth(420);
+    if (ImGui::BeginCombo(BindActionLabel(action), BindButtonName(BindButtonOf(action)))) {
+        for (int b = action == kActVrMenu ? 1 : 0; b < kButtonCount; ++b)
+            if (ImGui::Selectable(BindButtonName(b), BindButtonOf(action) == b))
+                button = b;
+        ImGui::EndCombo();
+    }
+    std::string also;
+    for (int other = 0; other < kActCount; ++other) {
+        BindAction o = (BindAction)other;
+        if (o == action || BindButtonOf(o) == kButtonNone || BindButtonOf(o) != BindButtonOf(action) ||
+            BindActionIsLongPress(o) != BindActionIsLongPress(action))
+            continue;
+        also += also.empty() ? "" : ", ";
+        also += BindActionLabel(o);
+    }
+    if (!also.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(also: %s)", also.c_str());
+    }
+    ImGui::PopID();
+}
+
+// The Controls tab: the button bindings, then what the fixed controls do.
 void ControlsTab()
 {
     struct Row {
@@ -161,31 +194,28 @@ void ControlsTab()
     };
     static const Row rows[] = {
         {"Left stick", "Move (in the direction you look)"},
-        {"Left stick click", "Toggle run"},
         {"Right stick left / right", "Snap turn (or smooth turn, Comfort tab)"},
-        {"Right stick up", "Jump"},
-        {"Right stick down", "Toggle crouch"},
-        {"Right stick click", "Map"},
         {"Right trigger", "Use weapon: hold to draw the bow, release to fire"},
         {"Swing the right hand", "Attack with the sword / blackjack"},
         {"Right grip", "Frob what your hand touches or points at: pick up, open, use"},
         {"Right grip, nothing highlighted", "Hold, swing and let go to throw the selected item (a gentle let-go drops it; Hands tab: Throw by swinging)"},
         {"Right grip on a crate, bottle...", "Hold to carry it in your hand; let go to drop it, or swing and let go to throw it"},
-        {"Left trigger", "Block"},
-        {"Left grip", "Hold crouch"},
-        {"A", "Next weapon"},
-        {"B", "Put the weapon away"},
-        {"X / Y", "Next / previous item (shown in your hand while the inventory shows it)"},
-        {"Hold Y", "Objectives"},
-        {"Left menu button", "Tap: game menu. Hold: this VR menu"},
         {"Crouch / lean with your body", "Crouch / lean in the game"},
-        {"Ladders and ropes", "Left stick forward climbs up, back climbs down; jump or crouch to let go"},
+        {"Ladders and ropes", "Grab one with a grip to get on; pull your hand down to climb up, push it up to climb down. Or the left stick: forward up, back down. Jump or crouch to let go"},
+        {"Doors", "Grab the handle with the right grip and pull or push (hold still with a key or lockpicks selected to use them)"},
+        {"Levers, buttons", "Grab a lever with the right grip and pull or push it; press a button with your hand"},
         {"Look at your wrists", "Left: light gem and health. Right: weapon. The inventory is at your left waist (HUD tab)"},
         {"Bow (two-handed, default)", "Bow in the left hand; squeeze the right grip at the bow, pull back, let go"},
         {"Bow (one-handed, Hands tab)", "Bow in the right hand; hold the right trigger to draw, release to fire"},
         {"Game menus, map, books", "Point with the right hand, trigger = click, B = back"},
         {"Keyboard", "F7 desktop mirror, F8 recenter, F10 this menu"},
     };
+    ImGui::Text("Buttons");
+    ImGui::TextDisabled("A button can hold two actions as a tap and a hold (e.g. previous item / objectives).");
+    for (int a = 0; a < kActCount; ++a)
+        BindingWidget((BindAction)a);
+    ImGui::Separator();
+    ImGui::Text("Other controls");
     if (ImGui::BeginTable("controls", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
         ImGui::TableSetupColumn("input", ImGuiTableColumnFlags_WidthFixed, 400.0f);
         ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthStretch);
@@ -225,7 +255,7 @@ void BuildUi()
         bool known = false;
         for (const char* t : tabs)
             known |= strcmp(t, settings[i].tab) == 0;
-        if (!known && strcmp(settings[i].tab, "Performance") != 0)
+        if (!known && strcmp(settings[i].tab, "Performance") != 0 && strcmp(settings[i].tab, "Controls") != 0)
             tabs.push_back(settings[i].tab);
     }
     tabs.insert(tabs.begin(), "Controls");
@@ -247,10 +277,10 @@ void BuildUi()
             if (!ImGui::BeginTabItem(tab))
                 continue;
             bool controls = strcmp(tab, "Controls") == 0;
-            ImGui::BeginChild("items", ImVec2(0, controls ? 0.0f : -80.0f));
+            ImGui::BeginChild("items", ImVec2(0, -80.0f));
             if (controls)
-                ControlsTab();
-            for (int i = 0; i < count; ++i) {
+                ControlsTab();  // (its settings, the bindings, are drawn there)
+            for (int i = 0; i < count && !controls; ++i) {
                 if (strcmp(settings[i].tab, tab) != 0 || HiddenNow(settings[i]))
                     continue;
                 if (strcmp(settings[i].name, "refresh_rate") == 0)
@@ -263,7 +293,7 @@ void BuildUi()
                 ImGui::TextWrapped("%s", VrTimingSummary());
             }
             ImGui::EndChild();
-            if (!controls && ImGui::Button("Reset this tab to defaults"))
+            if (ImGui::Button(controls ? "Reset the buttons to defaults" : "Reset this tab to defaults"))
                 ResetSettingsTab(tab);
             ImGui::EndTabItem();
         }

@@ -66,13 +66,103 @@ if ($supported.ContainsKey($hash)) {
 }
 
 # --- OpenXR runtime (32-bit) ------------------------------------------------
+# Thief 2 is 32-bit, so the OpenXR loader uses the 32-bit runtime setting
+# (WOW6432Node), not the one 64-bit apps use. If it's missing or broken, offer
+# to set it to a 32-bit runtime found on this PC (needs administrator rights).
 $runtimeKey = 'HKLM:\SOFTWARE\WOW6432Node\Khronos\OpenXR\1'
+$runtimeHint = ("Thief 2 is a 32-bit game, so it uses this 32-bit setting, not the one 64-bit apps use. " +
+                "Point it to your headset's 32-bit runtime (e.g. SteamVR: steamxr_win32.json; " +
+                "Virtual Desktop: virtualdesktop-openxr-32.json). Without it the game runs flat.")
+$runtimeSet = $null  # what the installer set (recorded for the uninstaller's note)
+
+# A runtime manifest's problem, or $null if it and its library are there.
+function RuntimeProblem($manifest) {
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return "the file doesn't exist: $manifest" }
+    try {
+        $library = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).runtime.library_path
+    } catch {
+        return "its manifest can't be read: $manifest"
+    }
+    if ($library -and -not [System.IO.Path]::IsPathRooted($library)) {
+        $library = Join-Path (Split-Path -Parent $manifest) $library
+    }
+    if ($library -and -not (Test-Path -LiteralPath $library -PathType Leaf)) { return "its library is missing: $library" }
+    return $null
+}
+
+# 32-bit runtimes on this PC, the likeliest first: the 32-bit partner of the
+# runtime 64-bit apps use, then SteamVR (any Steam library), Virtual Desktop.
+function Find32BitRuntimes {
+    $found = New-Object System.Collections.Generic.List[string]
+    $active64 = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -Name ActiveRuntime -ErrorAction SilentlyContinue).ActiveRuntime
+    if ($active64) {
+        $partners = @{ 'steamxr_win64.json' = 'steamxr_win32.json'; 'virtualdesktop-openxr.json' = 'virtualdesktop-openxr-32.json' }
+        $leaf = Split-Path -Leaf $active64
+        if ($partners.ContainsKey($leaf)) { $found.Add((Join-Path (Split-Path -Parent $active64) $partners[$leaf])) }
+    }
+    $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction SilentlyContinue).SteamPath
+    $libraries = @()
+    if ($steam) {
+        $libraries += $steam
+        $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+        if (Test-Path $vdf) {
+            foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) {
+                $libraries += $m.Groups[1].Value -replace '\\\\', '\'
+            }
+        }
+    }
+    foreach ($lib in $libraries) { $found.Add((Join-Path $lib 'steamapps\common\SteamVR\steamxr_win32.json')) }
+    $found.Add((Join-Path $env:ProgramFiles 'Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr-32.json'))
+    $seen = @{}
+    $usable = @()
+    foreach ($f in $found) {
+        $full = [System.IO.Path]::GetFullPath($f)
+        if (-not $seen.ContainsKey($full.ToLower()) -and -not (RuntimeProblem $full)) {
+            $seen[$full.ToLower()] = $true
+            $usable += $full
+        }
+    }
+    return ,$usable
+}
+
 $runtime = (Get-ItemProperty -Path $runtimeKey -Name ActiveRuntime -ErrorAction SilentlyContinue).ActiveRuntime
-if ($runtime) {
+$problem = if ($runtime) { RuntimeProblem $runtime } else { "none is set ($runtimeKey, ActiveRuntime)" }
+if (-not $problem) {
     Write-Host "32-bit OpenXR runtime: $runtime"
 } else {
-    Write-Host ("WARNING: no 32-bit OpenXR runtime is registered. Thief 2 is a 32-bit game and needs one; " +
-                "Virtual Desktop (VDXR) provides it. Without it the game runs flat.") -ForegroundColor Yellow
+    Write-Host "WARNING: no usable 32-bit OpenXR runtime: $problem" -ForegroundColor Yellow
+    Write-Host $runtimeHint -ForegroundColor Yellow
+    $candidates = Find32BitRuntimes
+    if ($candidates.Count -eq 0) {
+        Write-Host 'No 32-bit OpenXR runtime was found on this PC to set it to (SteamVR and Virtual Desktop provide one).' -ForegroundColor Yellow
+    } else {
+        Write-Host ''
+        Write-Host 'Found 32-bit OpenXR runtimes:'
+        for ($i = 0; $i -lt $candidates.Count; $i++) { Write-Host "  $($i + 1)) $($candidates[$i])" }
+        $answer = Read-Host "Set Thief 2's (32-bit) OpenXR runtime to one of these? Enter its number, or just Enter to skip"
+        $pick = 0
+        if ([int]::TryParse($answer, [ref]$pick) -and $pick -ge 1 -and $pick -le $candidates.Count) {
+            $chosen = $candidates[$pick - 1]
+            # HKLM needs administrator rights: reg.exe through a UAC prompt (the
+            # 64-bit registry view, so WOW6432Node is the real 32-bit key).
+            $regArgs = @('add', 'HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1', '/v', 'ActiveRuntime', '/t', 'REG_SZ',
+                      '/d', "`"$chosen`"", '/f', '/reg:64')
+            try {
+                Start-Process -FilePath "$env:SystemRoot\System32\reg.exe" -ArgumentList $regArgs -Verb RunAs -Wait -WindowStyle Hidden
+            } catch {
+                Write-Host 'The runtime setting was not changed (administrator permission was declined).' -ForegroundColor Yellow
+            }
+            $now = (Get-ItemProperty -Path $runtimeKey -Name ActiveRuntime -ErrorAction SilentlyContinue).ActiveRuntime
+            if ($now -eq $chosen) {
+                Write-Host "32-bit OpenXR runtime set: $chosen" -ForegroundColor Green
+                $runtimeSet = [pscustomobject]@{ set = $chosen; before = $runtime }
+            } else {
+                Write-Host 'WARNING: the 32-bit OpenXR runtime setting is unchanged.' -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host 'Skipped: the 32-bit OpenXR runtime setting is unchanged.'
+        }
+    }
 }
 
 # --- Install state (originals, for the uninstaller) ------------------------
@@ -175,6 +265,10 @@ foreach ($f in $modFiles) {
 }
 $versionFile = Join-Path $here 'VERSION.txt'
 if (Test-Path $versionFile) { $state.version = (Get-Content $versionFile -Raw).Trim() }
+if ($runtimeSet) {
+    if ($state.PSObject.Properties.Name -contains 'openxr_runtime') { $state.openxr_runtime = $runtimeSet }
+    else { $state | Add-Member -NotePropertyName openxr_runtime -NotePropertyValue $runtimeSet }
+}
 $state | ConvertTo-Json -Depth 4 | Set-Content -Path $statePath -Encoding UTF8
 Write-Host 'Mod files copied.'
 

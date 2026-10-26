@@ -34,6 +34,12 @@ if (Test-Path $statePath) {
     Write-Host 'WARNING: no install record (thief2vr_install.json); removing the mod files and its cam_ext.cfg block only.' -ForegroundColor Yellow
 }
 
+# --- OpenXR runtime: left as it is (other 32-bit VR apps use it too) ----------
+if ($state -and $state.PSObject.Properties.Name -contains 'openxr_runtime' -and $state.openxr_runtime) {
+    Write-Host ("Note: the installer set the 32-bit OpenXR runtime to $($state.openxr_runtime.set). It's left in place, " +
+                "since other 32-bit VR apps use it too.")
+}
+
 # --- Mod files ------------------------------------------------------------------
 $d3d9 = Join-Path $GameDir 'd3d9.dll'
 if (Test-Path $d3d9) {

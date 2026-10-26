@@ -1,6 +1,7 @@
 #include "device_hooks.h"
 
 #include "../log.h"
+#include "world_gamma.h"
 #include <MinHook.h>
 
 #include <intrin.h>
@@ -14,6 +15,7 @@ namespace {
 
 // IDirect3DDevice9 vtable slots (d3d9.h declaration order, IUnknown included).
 enum Slot {
+    kSetGammaRamp = 21,
     kCreateTexture = 23,
     kCreateVolumeTexture = 24,
     kCreateCubeTexture = 25,
@@ -242,6 +244,7 @@ void Trace(void* stack_top, const char* fmt, ...)
     typedef ret(STDMETHODCALLTYPE* PFN_##name)(__VA_ARGS__);      \
     PFN_##name g_real_##name;
 
+DECLARE_HOOK(void, SetGammaRamp, IDirect3DDevice9*, UINT, DWORD, const D3DGAMMARAMP*)
 DECLARE_HOOK(HRESULT, CreateTexture, IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
              IDirect3DTexture9**, HANDLE*)
 DECLARE_HOOK(HRESULT, CreateVolumeTexture, IDirect3DDevice9*, UINT, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
@@ -269,6 +272,15 @@ DECLARE_HOOK(HRESULT, DrawIndexedPrimitiveUP, IDirect3DDevice9*, D3DPRIMITIVETYP
              D3DFORMAT, const void*, UINT)
 DECLARE_HOOK(HRESULT, SetVertexDeclaration, IDirect3DDevice9*, IDirect3DVertexDeclaration9*)
 DECLARE_HOOK(HRESULT, SetFVF, IDirect3DDevice9*, DWORD)
+
+// --- The game's gamma option: its ramp (the monitor's) is also applied to the
+//     headset images (world_gamma), then set as usual ---
+
+void STDMETHODCALLTYPE HookSetGammaRamp(IDirect3DDevice9* d, UINT swap_chain, DWORD flags, const D3DGAMMARAMP* ramp)
+{
+    world_gamma::OnGameGammaRamp(ramp);
+    g_real_SetGammaRamp(d, swap_chain, flags, ramp);
+}
 
 // --- D3D9Ex: no MANAGED pool ---
 
@@ -549,6 +561,7 @@ void InstallDeviceHooks(IDirect3DDevice9* device, bool is_ex)
         Hook(vt, kCreateVertexBuffer, &HookCreateVertexBuffer, &g_real_CreateVertexBuffer);
         Hook(vt, kCreateIndexBuffer, &HookCreateIndexBuffer, &g_real_CreateIndexBuffer);
     }
+    Hook(vt, kSetGammaRamp, &HookSetGammaRamp, &g_real_SetGammaRamp);
     Hook(vt, kStretchRect, &HookStretchRect, &g_real_StretchRect);
     Hook(vt, kSetRenderTarget, &HookSetRenderTarget, &g_real_SetRenderTarget);
     Hook(vt, kSetDepthStencilSurface, &HookSetDepthStencilSurface, &g_real_SetDepthStencilSurface);
